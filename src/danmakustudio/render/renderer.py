@@ -1,0 +1,110 @@
+"""弹幕渲染器模块
+
+提供单线程渲染模式，管理画布和 QPainter，渲染每帧的弹幕。
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QImage, QPainter
+
+from ..layout.active import ActiveDanmaku
+from ..layout.params import LayoutParams, LayerParams
+
+
+def _text_danmaku_opacity(
+    current_y: float,
+    height: int,
+    limit: int,
+    fade_out_zone: float,
+) -> float:
+    """计算文本弹幕接近顶部时的整体透明度。
+
+    使用弹幕底部和自身高度参与计算，避免多行弹幕在顶部刚越界时
+    整块突然消失。
+    """
+    bottom = current_y + height
+    if bottom <= limit:
+        return 0.0
+
+    fade_zone = max(0.0, fade_out_zone)
+    if current_y >= limit + fade_zone:
+        return 1.0
+
+    fade_distance = max(float(height) + fade_zone, 1.0)
+    alpha = (bottom - limit) / fade_distance
+    return max(0.0, min(1.0, alpha))
+
+
+class DanmakuRenderer:
+    """弹幕渲染器：管理画布和 QPainter，渲染每帧的弹幕。
+
+    职责：
+        - 初始化画布和 QPainter
+        - 渲染当前帧的所有弹幕（含淡出效果）
+        - 管理画布生命周期
+    """
+
+    def __init__(self, layer_params: LayerParams):
+        """初始化渲染器。
+        Args:
+            layer_params: 渲染层参数
+        """
+        self._layer_params = layer_params
+        self.canvas = QImage(
+            layer_params.layer_w, layer_params.layer_h,
+            QImage.Format.Format_ARGB32,
+        )
+        self.painter = QPainter()
+        self.painter.begin(self.canvas)
+        self.painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+    def render_frame(
+        self,
+        active_danmakus: Iterable[ActiveDanmaku],
+        layout_params: LayoutParams,
+        fade_out_zone: float,
+    ) -> None:
+        """渲染当前帧的所有弹幕到画布。
+
+        包括淡出效果：弹幕接近屏幕顶部时逐渐透明，完全飞出时不可见。
+        Args:
+            active_danmakus: 当前活跃的弹幕列表
+            layout_params: 布局参数
+            fade_out_zone: 淡出区域高度（像素）
+        """
+        layer_y = self._layer_params.layer_y
+        self.canvas.fill(Qt.GlobalColor.transparent)  # 清空画布
+
+        for dm in active_danmakus:
+            cy = dm.current_y
+
+            alpha = 1.0
+            if not dm.event.is_gift:
+                alpha = _text_danmaku_opacity(
+                    cy, dm.height, layout_params.text_top, fade_out_zone,
+                )
+                if alpha <= 0.0:
+                    continue
+            self.painter.setOpacity(alpha)
+            local_x = dm.x - self._layer_params.layer_x
+            local_y = int(dm.current_y) - layer_y
+            dm.render(self.painter, int(local_x), local_y)
+
+    def get_frame_data(self) -> memoryview:
+        """获取当前画布的像素数据。
+
+        PySide6 中 QImage.bits() 必须拷贝一次像素数据（无法零拷贝），
+        用 memoryview 包裹返回，避免传递给 stdin.write 时产生二次拷贝。
+
+        Returns:
+            画布像素数据的 memoryview 视图
+        """
+        return memoryview(self.canvas.bits())
+
+    def end(self) -> None:
+        """结束绘制，释放 QPainter 资源。"""
+        self.painter.end()
