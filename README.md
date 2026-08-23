@@ -55,12 +55,35 @@ ffmpeg -hide_banner -encoders | findstr nvenc
 
 ## 安装
 
+### Windows 一键初始化（推荐）
+
 ```bash
 git clone https://github.com/febr30th/DanmakuStudio.git
 cd DanmakuStudio
 ```
 
-使用 pip 安装：
+在 PowerShell 中运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+脚本会优先寻找当前用户通过 python.org 安装的 Python 3.13+，创建 `.venv`、升级其中的 pip，并安装项目运行依赖与测试/检查工具。安装完成前还会验证 PySide6/Qt 能否正常导入。需要指定 Python 路径时，可增加 `-Python "C:\path\to\python.exe"`。
+
+FFmpeg 和 ffprobe 是外部运行依赖，不会下载到仓库；如果它们不在 `Path` 中，安装结束时会显示警告。
+
+完成初始化后，可以分别用一条命令运行测试或 GUI：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_gui.ps1
+```
+
+`test.ps1` 和 `run_gui.ps1` 在干净 clone 中发现 `.venv` 不存在时，也会自动先调用 `setup.ps1`。测试临时文件写入仓库内已忽略的 `.pytest-tmp/`，不会依赖系统临时目录权限。
+
+### 手动安装
+
+使用 pip 安装运行依赖：
 
 ```bash
 python -m pip install -e .
@@ -75,6 +98,20 @@ uv sync
 ## 快速开始
 
 ### 图形界面
+
+Windows 推荐使用仓库脚本：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\run_gui.ps1
+```
+
+也可以在已安装依赖或已激活虚拟环境后直接运行模块：
+
+```bash
+python -m danmakustudio.gui
+```
+
+安装项目后还可以使用命令入口：
 
 ```bash
 danmakustudio-gui
@@ -212,10 +249,16 @@ danmakustudio source/视频.mp4 source/弹幕.xml -c danmakustudio.yaml
 
 ## 打包
 
-项目提供了一键打包脚本：
+项目根目录提供一键打包脚本。干净 clone 中执行时，脚本会创建独立的 `.venv-build`、安装项目和 PyInstaller，然后根据 `DanmakuStudio.spec` 打包：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
+
+如果只想验证打包依赖和入口是否可用、但不生成 exe：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1 -CheckOnly
 ```
 
 打包完成后，可执行文件位于：
@@ -225,6 +268,8 @@ dist\DanmakuStudio\DanmakuStudio.exe
 ```
 
 发布时请保留整个 `dist\DanmakuStudio\` 文件夹。程序仍依赖系统中的 FFmpeg / ffprobe。
+
+不要运行 `build\DanmakuStudio\DanmakuStudio.exe`；它是 PyInstaller 的中间产物。最终程序是 `dist\DanmakuStudio\DanmakuStudio.exe`。
 
 ## 处理流程
 
@@ -256,7 +301,11 @@ DanmakuStudio/
 │   └── utils/                # 工具函数与输入输出校验
 ├── tests/                    # 测试
 ├── DanmakuStudio.spec        # PyInstaller 打包配置
-├── build_exe.ps1             # 一键打包脚本
+├── setup.ps1                 # 一键安装运行与开发依赖
+├── test.ps1                  # 一键运行测试
+├── run_gui.ps1               # 一键启动 GUI
+├── build_exe.ps1             # 一键打包 / 打包前检
+├── scripts/_common.ps1       # PowerShell 公共辅助函数
 ├── danmakustudio.yaml        # 默认配置文件
 ├── pyproject.toml
 ├── uv.lock
