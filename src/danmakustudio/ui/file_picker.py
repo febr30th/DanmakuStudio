@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFileSystemModel,
     QHBoxLayout,
+    QLabel,
     QMessageBox,
     QPushButton,
     QTreeView,
@@ -42,39 +43,55 @@ class FileFolderPickerDialog(QDialog):
 
     def __init__(self, parent: QWidget | None = None, start_dir: str | None = None):
         super().__init__(parent)
-        self.setWindowTitle("选择视频文件和/或文件夹")
-        self.resize(900, 580)
+        self.setWindowTitle("选择视频或文件夹")
+        self.resize(920, 620)
+        self.setMinimumSize(720, 500)
         self._selected_paths: list[str] = []
         self._location_kind = "path"
         self._ignore_next_accept = False
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("选择视频或文件夹")
+        title.setObjectName("pageTitle")
+        hint = QLabel("支持多选视频；选择文件夹时会递归查找，并自动匹配同名 XML/LRC。")
+        hint.setObjectName("dialogHint")
+        layout.addWidget(title)
+        layout.addWidget(hint)
 
         top_layout = QHBoxLayout()
-        self.btn_up = QPushButton("上一级")
-        self.btn_current = QPushButton("选择当前文件夹")
+        top_layout.setSpacing(8)
+        self.btn_up = QPushButton("←  上一级")
+        self.btn_current = QPushButton("＋  使用当前文件夹")
         self.path_label = QPushButton()
-        self.path_label.setFlat(True)
+        self.path_label.setObjectName("pathButton")
         self.path_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.path_label.setStyleSheet("text-align: left; padding: 4px 8px;")
         top_layout.addWidget(self.btn_up)
         top_layout.addWidget(self.btn_current)
         top_layout.addWidget(self.path_label, 1)
         layout.addLayout(top_layout)
 
         self.fs_model = QFileSystemModel(self)
-        self.fs_model.setFilter(QDir.AllDirs | QDir.Files | QDir.NoDotAndDotDot | QDir.Drives)
+        self.fs_model.setFilter(
+            QDir.AllDirs | QDir.Files | QDir.NoDotAndDotDot | QDir.Drives
+        )
         self.fs_model.setNameFilters(video_name_filters())
         self.fs_model.setNameFilterDisables(False)
         self.fs_model.setRootPath("")
 
         self.desktop_model = QStandardItemModel(self)
-        self.desktop_model.setHorizontalHeaderLabels(["Name"])
+        self.desktop_model.setHorizontalHeaderLabels(["名称"])
 
         self.tree = QTreeView(self)
+        self.tree.setObjectName("fileTree")
         self.tree.setModel(self.fs_model)
         self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setAnimated(True)
+        self.tree.setUniformRowHeights(True)
         self.tree.setSortingEnabled(True)
         self.tree.sortByColumn(0, Qt.AscendingOrder)
         self.tree.setColumnWidth(0, 420)
@@ -82,6 +99,13 @@ class FileFolderPickerDialog(QDialog):
         layout.addWidget(self.tree, 1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        cancel_button = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+        if ok_button is not None:
+            ok_button.setText("确认选择")
+            ok_button.setObjectName("primaryButton")
+        if cancel_button is not None:
+            cancel_button.setText("取消")
         for button in buttons.buttons():
             button.setAutoDefault(False)
             button.setDefault(False)
@@ -97,8 +121,15 @@ class FileFolderPickerDialog(QDialog):
         self._init_root(start_dir)
 
     def eventFilter(self, watched, event) -> bool:
-        if watched is self.tree.viewport() and event.type() == QEvent.Type.MouseButtonDblClick:
-            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        if (
+            watched is self.tree.viewport()
+            and event.type() == QEvent.Type.MouseButtonDblClick
+        ):
+            pos = (
+                event.position().toPoint()
+                if hasattr(event, "position")
+                else event.pos()
+            )
             index = self.tree.indexAt(pos)
             if index.isValid() and self.tree.model() is self.desktop_model:
                 return self.open_desktop_item(index)
@@ -166,7 +197,7 @@ class FileFolderPickerDialog(QDialog):
 
     def _rebuild_desktop_model(self) -> None:
         self.desktop_model.clear()
-        self.desktop_model.setHorizontalHeaderLabels(["Name"])
+        self.desktop_model.setHorizontalHeaderLabels(["名称"])
         self.desktop_model.appendRow(self._desktop_item("此电脑", "computer"))
 
         desktop = Path(self.desktop_directory())
@@ -177,8 +208,7 @@ class FileFolderPickerDialog(QDialog):
 
         for child in children:
             if child.is_dir() or (
-                child.is_file()
-                and child.suffix.lower() in SUPPORTED_VIDEO_EXTS
+                child.is_file() and child.suffix.lower() in SUPPORTED_VIDEO_EXTS
             ):
                 self.desktop_model.appendRow(
                     self._desktop_item(child.name, "path", str(child))
@@ -307,11 +337,9 @@ class FileFolderPickerDialog(QDialog):
         return self._selected_paths
 
     def finish_selection(self, paths: list[str]) -> None:
-        selected = sorted({
-            os.path.abspath(path)
-            for path in paths
-            if path and os.path.exists(path)
-        })
+        selected = sorted(
+            {os.path.abspath(path) for path in paths if path and os.path.exists(path)}
+        )
         if not selected:
             return
 
@@ -356,8 +384,7 @@ class FileFolderPickerDialog(QDialog):
                 continue
             candidate = Path(path)
             if candidate.is_dir() or (
-                candidate.is_file()
-                and candidate.suffix.lower() in SUPPORTED_VIDEO_EXTS
+                candidate.is_file() and candidate.suffix.lower() in SUPPORTED_VIDEO_EXTS
             ):
                 selected.append(os.path.abspath(path))
 

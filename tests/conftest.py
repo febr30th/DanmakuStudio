@@ -9,11 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from PySide6.QtGui import QGuiApplication, QFont, QFontMetrics, QImage, QColor
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage
+from PySide6.QtWidgets import QApplication
 
 from danmakustudio.config import DEFAULT_CONFIG
-from danmakustudio.render.assets import load_image_assets
 from danmakustudio.input.parser import parse_xml
+from danmakustudio.render.assets import load_image_assets
 from danmakustudio.utils import extract_emoji_names
 
 style = DEFAULT_CONFIG.style
@@ -31,6 +32,7 @@ FONT_SIZE = style.font_size
 @dataclass
 class MockAssetLoader:
     """模拟 AssetLoader，提供测试所需的字体、缓存和度量信息。"""
+
     font: QFont
     fm: QFontMetrics
     line_height: int
@@ -66,7 +68,7 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def qapp():
-    app = QGuiApplication.instance() or QGuiApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     yield app
 
 

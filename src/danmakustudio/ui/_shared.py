@@ -18,6 +18,18 @@ def last_dir_path() -> Path:
     return Path.home() / ".danmakustudio_last_dir.txt"
 
 
+def last_config_dir_path() -> Path:
+    return Path.home() / ".danmakustudio_last_config_dir.txt"
+
+
+def source_project_dir() -> Path:
+    """返回源码项目目录；打包后不可用时回退到当前目录。"""
+    candidate = Path(__file__).resolve().parents[3]
+    if (candidate / "pyproject.toml").is_file():
+        return candidate
+    return Path.cwd()
+
+
 def dialog_start_dir_from_path(path_text: str, fallback: str) -> str:
     """根据输入框路径推导文件对话框的起始目录。"""
     raw_path = os.path.expandvars(os.path.expanduser(path_text.strip()))
@@ -36,6 +48,33 @@ def dialog_start_dir_from_path(path_text: str, fallback: str) -> str:
     return str(get_app_dir())
 
 
+def config_dialog_start_location(path_text: str, last_config_dir: str = "") -> str:
+    """按配置文件场景的优先级返回打开对话框的初始位置。"""
+    raw_path = os.path.expandvars(os.path.expanduser(path_text.strip()))
+    if raw_path:
+        selected_path = Path(raw_path)
+        if selected_path.is_file():
+            # 传入完整文件名，让 QFileDialog 打开后直接高亮当前选择。
+            return str(selected_path)
+        if selected_path.is_dir():
+            return str(selected_path)
+        if selected_path.parent.is_dir():
+            return str(selected_path)
+
+    default_dirs = (
+        Path(last_config_dir) if last_config_dir else None,
+        get_app_dir(),
+        source_project_dir(),
+        Path(sys.executable).resolve().parent,
+        Path.home(),
+    )
+    for candidate in default_dirs:
+        if candidate is not None and candidate.is_dir():
+            return str(candidate)
+
+    return str(Path.cwd())
+
+
 def format_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     minutes, sec = divmod(seconds, 60)
@@ -43,4 +82,3 @@ def format_duration(seconds: float) -> str:
     if hours:
         return f"{hours:02d}:{minutes:02d}:{sec:02d}"
     return f"{minutes:02d}:{sec:02d}"
-

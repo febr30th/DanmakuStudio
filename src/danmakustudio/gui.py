@@ -25,6 +25,7 @@ from .ui.file_picker import (
     video_name_filters as _video_name_filters,
 )
 from .ui.main_window import DanmakuStudioWindow
+from .ui.theme import apply_theme
 from .ui.worker import ANSI_ESCAPE_RE, BatchWorker, QtLogStream
 
 __all__ = [
@@ -38,7 +39,10 @@ __all__ = [
 
 
 def main() -> None:
-    app = QApplication.instance() or QApplication(sys.argv)
+    app = QApplication.instance()
+    if not isinstance(app, QApplication):
+        app = QApplication(sys.argv)
+    apply_theme(app)
     window = DanmakuStudioWindow()
     window.show()
     sys.exit(app.exec())
