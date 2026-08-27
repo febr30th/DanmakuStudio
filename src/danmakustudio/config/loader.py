@@ -29,6 +29,11 @@ def _is_dataclass_type(tp: Any) -> bool:
     return is_dataclass(tp)
 
 
+def _allows_none(tp: Any) -> bool:
+    """判断类型注解是否显式允许 None。"""
+    return type(None) in typing.get_args(tp)
+
+
 # =============================================================================
 # 配置搜索路径
 # =============================================================================
@@ -61,10 +66,16 @@ def _dict_to_config(data: dict[str, Any], config_cls: type[Any], path: str = "")
         if f.name not in data:
             continue
         value = data[f.name]
-        if value is None:
-            continue
         field_type = type_hints.get(f.name, f.type)
         field_path = f"{path}.{f.name}" if path else f.name
+        if value is None:
+            if _is_dataclass_type(field_type):
+                # 空配置段沿用该段的默认配置，兼容现有配置文件。
+                continue
+            if _allows_none(field_type):
+                kwargs[f.name] = None
+                continue
+            raise ConfigError(f"{field_path} 不能为 null")
         if _is_dataclass_type(field_type):
             if not isinstance(value, dict):
                 raise ConfigError(f"{field_path} 必须是键值映射")

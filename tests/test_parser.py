@@ -11,6 +11,7 @@ from PySide6.QtGui import QGuiApplication
 
 from danmakustudio.input.parser import parse_lrc, parse_subtitle, parse_xml
 from danmakustudio.config import DEFAULT_CONFIG
+from danmakustudio.errors import InputError
 
 
 @pytest.fixture(scope="session")
@@ -317,3 +318,13 @@ class TestParseLrc:
         events = parse_subtitle(path)
         assert len(events) == 1
         assert events[0].text == "正文"
+
+    def test_lrc_read_error_raises_input_error(self, monkeypatch):
+        """LRC 读取失败必须终止任务，不能伪装成空字幕。"""
+        def fail_open(*_args, **_kwargs):
+            raise PermissionError("permission denied")
+
+        monkeypatch.setattr("builtins.open", fail_open)
+
+        with pytest.raises(InputError, match="LRC 文件读取失败"):
+            parse_subtitle("unreadable.lrc")

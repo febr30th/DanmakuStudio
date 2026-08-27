@@ -85,7 +85,7 @@ class DanmakuBurner:
         self._asset_provider = AssetLoader(font_size=self._config.style.font_size)
         self._frame_encoder = FFmpegManager(
             video_in, self.video_out, encode_mode,
-            self._config.encode, self._config.system,
+            self._config.encode, self._config.system, force=force,
         )
 
     def run(self) -> None:
@@ -184,7 +184,7 @@ class DanmakuBurner:
         finally:
             logger.debug("清理资源")
             try:
-                self._frame_encoder.cleanup()
+                self._frame_encoder.cleanup(publish_output=not run_failed)
             except DanmakuStudioError:
                 if run_failed:
                     logger.exception("FFmpeg 清理阶段也发生错误")

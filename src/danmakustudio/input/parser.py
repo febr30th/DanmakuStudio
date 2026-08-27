@@ -11,6 +11,7 @@ from pathlib import Path
 from lxml import etree  # type: ignore
 from loguru import logger
 
+from ..errors import InputError
 from .event import DanmakuEvent
 
 SUPPORTED_SUBTITLE_EXTS = frozenset({".xml", ".lrc"})
@@ -207,8 +208,7 @@ def parse_lrc(lrc_path: str) -> list[DanmakuEvent]:
                         text=text,
                     ))
     except OSError as e:
-        logger.debug(f"LRC 读取失败: {lrc_path} ({e})")
-        return []
+        raise InputError(f"LRC 文件读取失败: {lrc_path} - {e}") from e
 
     events.sort(key=lambda e: e.time)
     return events

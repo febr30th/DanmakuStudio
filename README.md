@@ -1,5 +1,7 @@
 # DanmakuStudio
 
+[中文](README.md) | [English](README.en.md)
+
 图形化弹幕/LRC 批量压制工具。它可以将直播录像与弹幕 XML/LRC 合成，以半透明圆角气泡形式将弹幕永久烧录到视频中。
 
 ## 特性
@@ -131,6 +133,9 @@ danmakustudio
 .mp4 .flv .mkv .avi .mov .ts .webm
 ```
 
+输出支持 `.mp4`、`.flv`、`.mkv`、`.avi` 和 `.mov`。输出音频会编码为
+AAC 192 kbps，避免输入音频编码与输出容器不兼容导致压制失败。
+
 支持的字幕扩展名：
 
 ```text
@@ -241,11 +246,9 @@ danmakustudio source/视频.mp4 source/弹幕.xml -c danmakustudio.yaml
 | 参数                      | 内置默认值    | 说明                          |
 | ----------------------- | -------- | --------------------------- |
 | `pipe_buffer_size`      | 10000000 | 管道缓冲区大小（字节）                 |
-| `pipe_queue_size`       | 16       | 异步写入队列大小                    |
-| `ffmpeg_timeout`        | 10       | FFmpeg 启动超时（秒）              |
+| `ffmpeg_timeout`        | 10       | FFmpeg/ffprobe 检测与元数据读取超时（秒）  |
 | `stderr_thread_timeout` | 5        | 错误日志线程超时（秒）                 |
 | `video_alignment`       | 2        | 视频尺寸对齐到偶数，避免 1080 被放大到 1088 |
-| `max_queue_frames`      | 64       | 异步写入队列最大帧数                  |
 
 ## 打包
 

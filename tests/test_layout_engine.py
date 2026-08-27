@@ -767,3 +767,77 @@ class TestSpawnNewDanmakusGift:
         assert gift_new is True
         assert len(active_text) == 1
         assert len(active_gift) == 1
+
+    def test_blocked_text_head_does_not_block_gift(
+        self, font_metrics, emoji_cache, gift_cache, asset_loader,
+    ):
+        batch_size = DEFAULT_CONFIG.animation.text_spawn_batch_size
+        blocked_text = [
+            _make_active_danmaku(
+                f"积压文本{i}", font_metrics, emoji_cache, gift_cache, time=1.0,
+            )
+            for i in range(batch_size + 1)
+        ]
+        gift = _make_active_danmaku(
+            "", font_metrics, emoji_cache, gift_cache,
+            time=1.0, is_gift=True, gift_name="火箭", gift_count=1,
+        )
+        pool = [*blocked_text, gift]
+        active_text: list[ActiveDanmaku] = []
+        active_gift: list[ActiveDanmaku] = []
+        ctx = LayoutContext(
+            last_text_spawn_time=1.0,
+            last_gift_spawn_time=-1.0,
+        )
+
+        text_new, gift_new, text_emitted, gift_emitted = (
+            LayoutEngine.spawn_new_danmakus(
+                ctx, 1.1, pool, active_text, active_gift, asset_loader,
+            )
+        )
+
+        assert text_new is False
+        assert text_emitted == 0
+        assert active_text == []
+        assert gift_new is True
+        assert gift_emitted == 1
+        assert active_gift == [gift]
+        assert ctx.text_event_idx == 0
+        assert ctx.gift_event_idx == len(pool)
+
+    def test_blocked_gift_head_does_not_block_text(
+        self, font_metrics, emoji_cache, gift_cache, asset_loader,
+    ):
+        batch_size = DEFAULT_CONFIG.animation.gift_spawn_batch_size
+        blocked_gifts = [
+            _make_active_danmaku(
+                "", font_metrics, emoji_cache, gift_cache,
+                time=1.0, is_gift=True, gift_name="火箭", gift_count=1,
+            )
+            for _ in range(batch_size + 1)
+        ]
+        text = _make_active_danmaku(
+            "后续文本", font_metrics, emoji_cache, gift_cache, time=1.0,
+        )
+        pool = [*blocked_gifts, text]
+        active_text: list[ActiveDanmaku] = []
+        active_gift: list[ActiveDanmaku] = []
+        ctx = LayoutContext(
+            last_text_spawn_time=-1.0,
+            last_gift_spawn_time=1.0,
+        )
+
+        text_new, gift_new, text_emitted, gift_emitted = (
+            LayoutEngine.spawn_new_danmakus(
+                ctx, 1.1, pool, active_text, active_gift, asset_loader,
+            )
+        )
+
+        assert gift_new is False
+        assert gift_emitted == 0
+        assert active_gift == []
+        assert text_new is True
+        assert text_emitted == 1
+        assert active_text == [text]
+        assert ctx.gift_event_idx == 0
+        assert ctx.text_event_idx == len(pool)

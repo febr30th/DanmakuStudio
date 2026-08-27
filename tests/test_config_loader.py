@@ -41,6 +41,26 @@ def test_load_config_null_section_falls_back_to_default(tmp_path):
     assert config.encode == DEFAULT_CONFIG.encode
 
 
+def test_load_config_preserves_null_for_optional_value(tmp_path):
+    config_path = tmp_path / "optional_null.yaml"
+    config_path.write_text(
+        "animation:\n  gift_dwell_time: null\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.animation.gift_dwell_time is None
+
+
+def test_load_config_rejects_null_for_required_value(tmp_path):
+    config_path = tmp_path / "required_null.yaml"
+    config_path.write_text("style:\n  font_size: null\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=r"style\.font_size 不能为 null"):
+        load_config(config_path)
+
+
 def test_load_config_validation_error_is_config_error(tmp_path):
     config_path = tmp_path / "invalid_value.yaml"
     config_path.write_text("system:\n  video_alignment: 3\n", encoding="utf-8")

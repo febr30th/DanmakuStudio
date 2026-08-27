@@ -24,11 +24,20 @@ from .params import LayoutParams, LayerParams
 class LayoutContext:
     """布局上下文"""
     animation: AnimationParams = field(default_factory=lambda: DEFAULT_CONFIG.animation)
+    # 兼容旧调用方的公共游标；内部实际按文本和礼物分别推进。
     event_idx: int = 0
     # 上次发射文本弹幕的时间。0.0 表示尚未发射过。
     last_text_spawn_time: float = 0.0
     # 上次发射礼物弹幕的时间。0.0 表示尚未发射过。
     last_gift_spawn_time: float = 0.0
+    text_event_idx: int | None = None
+    gift_event_idx: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.text_event_idx is None:
+            self.text_event_idx = self.event_idx
+        if self.gift_event_idx is None:
+            self.gift_event_idx = self.event_idx
 
 
 class LayoutEngine:
@@ -139,67 +148,88 @@ class LayoutEngine:
             (text_has_new, gift_has_new, text_emitted, gift_emitted)
         """
         animation = ctx.animation
-        event_idx = ctx.event_idx
+        assert ctx.text_event_idx is not None
+        assert ctx.gift_event_idx is not None
 
-        # 扫描积压弹幕，同时按类型统计待处理数量
-        pending_end = event_idx
-        pending_text = 0
-        pending_gift = 0
+        ctx.text_event_idx, text_emitted = LayoutEngine._spawn_danmaku_type(
+            current_time,
+            danmaku_pool,
+            ctx.text_event_idx,
+            active_text,
+            asset_provider,
+            is_gift=False,
+            batch_size=animation.text_spawn_batch_size,
+            spawn_interval=animation.text_spawn_interval,
+            last_spawn_time=ctx.last_text_spawn_time,
+            max_rows=max_text_rows,
+        )
+        ctx.gift_event_idx, gift_emitted = LayoutEngine._spawn_danmaku_type(
+            current_time,
+            danmaku_pool,
+            ctx.gift_event_idx,
+            active_gift,
+            asset_provider,
+            is_gift=True,
+            batch_size=animation.gift_spawn_batch_size,
+            spawn_interval=animation.gift_spawn_interval,
+            last_spawn_time=ctx.last_gift_spawn_time,
+            max_rows=max_gift_rows,
+        )
+
+        # 旧 event_idx 表示两个独立流中尚未全部消费的最早位置。
+        ctx.event_idx = min(ctx.text_event_idx, ctx.gift_event_idx)
+        if text_emitted > 0:
+            ctx.last_text_spawn_time = current_time
+        if gift_emitted > 0:
+            ctx.last_gift_spawn_time = current_time
+
+        return text_emitted > 0, gift_emitted > 0, text_emitted, gift_emitted
+
+    @staticmethod
+    def _spawn_danmaku_type(
+        current_time: float,
+        danmaku_pool: list['ActiveDanmaku'],
+        event_idx: int,
+        active_danmakus: list['ActiveDanmaku'],
+        asset_provider: 'AssetLoader',
+        *,
+        is_gift: bool,
+        batch_size: int,
+        spawn_interval: float,
+        last_spawn_time: float,
+        max_rows: int | None,
+    ) -> tuple[int, int]:
+        """独立推进一种弹幕，避免另一种弹幕在队头造成阻塞。"""
+        pending = 0
         for i in range(event_idx, len(danmaku_pool)):
-            if danmaku_pool[i].event.time > current_time:
+            dm = danmaku_pool[i]
+            if dm.event.time > current_time:
                 break
-            if danmaku_pool[i].event.is_gift:
-                pending_gift += 1
-            else:
-                pending_text += 1
-            pending_end = i + 1
+            if dm.event.is_gift == is_gift:
+                pending += 1
 
-        # 动态间隔：无积压时立即发射，有积压时检查间隔
-        # last_*_spawn_time == 0.0 表示尚未发射过，免间隔检查避免初始延迟
-        text_can = (
-            pending_text <= animation.text_spawn_batch_size
-            or ctx.last_text_spawn_time == 0.0
-            or (current_time - ctx.last_text_spawn_time) >= animation.text_spawn_interval
+        can_spawn = (
+            pending <= batch_size
+            or last_spawn_time == 0.0
+            or (current_time - last_spawn_time) >= spawn_interval
         )
-        gift_can = (
-            pending_gift <= animation.gift_spawn_batch_size
-            or ctx.last_gift_spawn_time == 0.0
-            or (current_time - ctx.last_gift_spawn_time) >= animation.gift_spawn_interval
-        )
+        emitted = 0
+        emitted_rows = 0
 
-        if not text_can and not gift_can:
-            return False, False, 0, 0
-
-        text_emitted = 0
-        gift_emitted = 0
-        emitted_text_rows = 0
-        emitted_gift_rows = 0
-        # 生成新弹幕
-        # 注意：当某类弹幕不能发射时（间隔未到或批次已满），
-        # 必须 break 停止扫描，而不是 continue 跳过。
-        # 因为 event_idx 是顺序推进的，跳过会导致该弹幕永久丢失。
-        while event_idx < pending_end:
+        while event_idx < len(danmaku_pool):
             dm = danmaku_pool[event_idx]
-            is_gift = dm.event.is_gift
+            if dm.event.time > current_time:
+                break
+            if dm.event.is_gift != is_gift:
+                event_idx += 1
+                continue
+            if not can_spawn or emitted >= batch_size:
+                break
 
-            if is_gift:
-                if not gift_can or gift_emitted >= animation.gift_spawn_batch_size:
-                    break
-                dm_rows = _danmaku_row_count(dm)
-                if not _fits_row_budget(emitted_gift_rows, dm_rows, max_gift_rows):
-                    break
-                gift_emitted += 1
-                emitted_gift_rows += dm_rows
-            else:
-                if not text_can or text_emitted >= animation.text_spawn_batch_size:
-                    break
-                dm_rows = _danmaku_row_count(dm)
-                if not _fits_row_budget(emitted_text_rows, dm_rows, max_text_rows):
-                    break
-                text_emitted += 1
-                emitted_text_rows += dm_rows
+            dm_rows = _danmaku_row_count(dm)
+            if not _fits_row_budget(emitted_rows, dm_rows, max_rows):
+                break
 
-            # 首次激活时预渲染缓存图片
             if dm.cached_image is None:
                 dm.pre_render(
                     asset_provider.font,
@@ -207,24 +237,15 @@ class LayoutEngine:
                     asset_provider.gift_cache,
                     asset_provider.bg_color,
                 )
-
-            # 记录生成时间（用于礼物停留计时）
             if dm.spawn_time == 0.0:
                 dm.spawn_time = current_time
 
-            if is_gift:
-                active_gift.append(dm)
-            else:
-                active_text.append(dm)
+            active_danmakus.append(dm)
+            emitted += 1
+            emitted_rows += dm_rows
             event_idx += 1
 
-        ctx.event_idx = event_idx
-        if text_emitted > 0:
-            ctx.last_text_spawn_time = current_time
-        if gift_emitted > 0:
-            ctx.last_gift_spawn_time = current_time
-
-        return text_emitted > 0, gift_emitted > 0, text_emitted, gift_emitted
+        return event_idx, emitted
 
     @staticmethod
     def update_positions(

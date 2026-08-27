@@ -11,7 +11,9 @@ import math
 import os
 import subprocess
 import threading
+from pathlib import Path
 from typing import Deque
+from uuid import uuid4
 
 from loguru import logger
 
@@ -23,6 +25,7 @@ from ..layout.params import LayerParams
 # Windows 的 GUI 进程没有可继承的控制台。显式禁止 FFmpeg/ffprobe
 # 创建新控制台窗口；其他平台使用 0，保持 subprocess 的默认行为。
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_AUDIO_ENCODE_ARGS = ("-c:a", "aac", "-b:a", "192k")
 
 
 class FFmpegManager:
@@ -35,9 +38,12 @@ class FFmpegManager:
         encode_mode: str = EncodeMode.AUTO,
         encode_params: EncodeParams = DEFAULT_CONFIG.encode,
         system_params: SystemParams = DEFAULT_CONFIG.system,
+        force: bool = False,
     ):
         self.video_in = video_in
         self.video_out = video_out
+        self.force = force
+        self._temp_video_out = self._make_temporary_output_path(video_out)
         self.encode_mode = encode_mode
         self.encode_params = encode_params
         self.system_params = system_params
@@ -47,6 +53,16 @@ class FFmpegManager:
         self.stderr_tail: Deque[str] = deque(maxlen=20)
 
         self._resolve_encode_mode()
+
+    @staticmethod
+    def _make_temporary_output_path(video_out: str) -> str:
+        """在最终输出目录中生成保留原扩展名的唯一临时路径。"""
+        output_path = Path(video_out)
+        temp_name = (
+            f".{output_path.stem}.danmakustudio-{uuid4().hex}"
+            f"{output_path.suffix}"
+        )
+        return str(output_path.with_name(temp_name))
 
     def _resolve_encode_mode(self) -> None:
         """解析编码模式。"""
@@ -82,18 +98,18 @@ class FFmpegManager:
         self.active_pipeline = EncodeMode.CPU
         logger.info("编码模式: CPU (libx264) — 自动回退")
 
-    @staticmethod
-    def _check_nvenc_available() -> bool:
+    def _check_nvenc_available(self) -> bool:
         """检查 NVENC 是否可用"""
+        timeout = self.system_params.ffmpeg_timeout
         try:
             result = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=timeout,
                 creationflags=_CREATE_NO_WINDOW,
             )
             if "h264_nvenc" not in result.stdout:
                 return False
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
         try:
@@ -103,25 +119,25 @@ class FFmpegManager:
                     "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
                     "-c:v", "h264_nvenc", "-f", "null", "-",
                 ],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=timeout,
                 creationflags=_CREATE_NO_WINDOW,
             )
             return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
-    @staticmethod
-    def _check_qsv_available() -> bool:
+    def _check_qsv_available(self) -> bool:
         """检查 QSV 是否可用"""
+        timeout = self.system_params.ffmpeg_timeout
         try:
             result = subprocess.run(
                 ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=timeout,
                 creationflags=_CREATE_NO_WINDOW,
             )
             if "h264_qsv" not in result.stdout:
                 return False
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
         try:
@@ -131,11 +147,11 @@ class FFmpegManager:
                     "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
                     "-c:v", "h264_qsv", "-f", "null", "-",
                 ],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=timeout,
                 creationflags=_CREATE_NO_WINDOW,
             )
             return result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
             return False
 
     @staticmethod
@@ -189,10 +205,17 @@ class FFmpegManager:
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=self.system_params.ffmpeg_timeout,
                 creationflags=_CREATE_NO_WINDOW,
             )
             data = json.loads(result.stdout)
             info = data["streams"][0]
+        except subprocess.TimeoutExpired as e:
+            raise EncodeError(
+                f"读取视频信息超时（{self.system_params.ffmpeg_timeout} 秒）"
+            ) from e
+        except FileNotFoundError as e:
+            raise EncodeError("未找到 ffprobe，请确认 FFmpeg 已安装并加入 Path") from e
         except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, IndexError) as e:
             raise EncodeError(f"读取视频信息失败: {e}") from e
 
@@ -252,8 +275,8 @@ class FFmpegManager:
             "-pix_fmt", "yuv420p",
             "-rc:v", "constqp",
             "-qp", str(self.encode_params.gpu_cq),
-            "-c:a", "copy",
-            self.video_out,
+            *_AUDIO_ENCODE_ARGS,
+            self._temp_video_out,
         ]
 
     def _build_qsv_command(self, fps: float, w: int, h: int, lp: LayerParams) -> list[str]:
@@ -278,8 +301,8 @@ class FFmpegManager:
             "-profile:v", "high",
             "-pix_fmt", "nv12",
             "-global_quality", str(self.encode_params.qsv_quality),
-            "-c:a", "copy",
-            self.video_out,
+            *_AUDIO_ENCODE_ARGS,
+            self._temp_video_out,
         ]
 
     def _build_cpu_command(self, fps: float, w: int, h: int, lp: LayerParams) -> list[str]:
@@ -308,8 +331,8 @@ class FFmpegManager:
             "-preset", self.encode_params.cpu_preset,
             "-crf", str(self.encode_params.cpu_crf),
             "-threads", str(encode_threads),
-            "-c:a", "copy",
-            self.video_out,
+            *_AUDIO_ENCODE_ARGS,
+            self._temp_video_out,
         ]
 
     def start(self, ffmpeg_cmd: list[str]) -> None:
@@ -376,17 +399,45 @@ class FFmpegManager:
         except (BrokenPipeError, OSError) as e:
             raise BrokenPipeError(f"FFmpeg 管道断开: {e}") from e
 
-    def cleanup(self) -> None:
+    def _discard_temporary_output(self) -> None:
+        """删除未发布的临时输出，不用清理错误掩盖原始任务异常。"""
+        temp_path = Path(self._temp_video_out)
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("无法删除临时输出: {} ({})", temp_path, e)
+
+    def _publish_output(self) -> None:
+        """把完整临时文件原子发布到最终输出路径。"""
+        temp_path = Path(self._temp_video_out)
+        output_path = Path(self.video_out)
+
+        try:
+            has_complete_file = temp_path.is_file() and temp_path.stat().st_size > 0
+        except OSError as e:
+            raise EncodeError(f"检查 FFmpeg 临时输出失败: {temp_path} - {e}") from e
+        if not has_complete_file:
+            raise EncodeError(f"FFmpeg 未生成输出文件: {temp_path}")
+        if output_path.exists() and not self.force:
+            raise EncodeError(f"编码期间输出文件已被创建，未覆盖: {output_path}")
+
+        try:
+            os.replace(temp_path, output_path)
+        except OSError as e:
+            raise EncodeError(f"发布输出文件失败: {output_path} - {e}") from e
+
+    def cleanup(self, *, publish_output: bool = True) -> None:
         """清理资源。
 
         按顺序完成：
         1. 关闭 stdin 管道，通知 FFmpeg 输入结束
-        2. 等待 stderr 线程结束（避免日志丢失）
-        3. 等待 FFmpeg 进程退出
-        4. 关闭 stderr 管道，释放资源
+        2. 等待 FFmpeg 进程退出
+        3. 等待 stderr 线程结束并关闭管道
+        4. 成功时原子发布输出，否则删除临时文件
         """
         proc = self.process
         if proc is None:
+            self._discard_temporary_output()
             return
 
         # 第一步：关闭 stdin，通知 FFmpeg 输入结束
@@ -399,11 +450,10 @@ class FFmpegManager:
         # 第二步：等待 FFmpeg 进程退出
         logger.debug("等待 FFmpeg 完成编码...")
         cleanup_error: EncodeError | None = None
+        return_code: int | None = None
         try:
             return_code = proc.wait(timeout=300.0)
-            if return_code == 0:
-                logger.success(f"压制完成: {self.video_out}")
-            else:
+            if return_code != 0:
                 logger.error(f"压制失败 (code={return_code})")
                 self._log_stderr_tail()
                 cleanup_error = EncodeError(f"FFmpeg 编码失败，退出码 {return_code}")
@@ -425,6 +475,17 @@ class FFmpegManager:
                 except (OSError, BrokenPipeError):
                     pass
             self.process = None
+
+        if cleanup_error is None and return_code == 0 and publish_output:
+            try:
+                self._publish_output()
+            except EncodeError as e:
+                cleanup_error = e
+            else:
+                logger.success(f"压制完成: {self.video_out}")
+
+        if cleanup_error is not None or not publish_output:
+            self._discard_temporary_output()
 
         if cleanup_error is not None:
             raise cleanup_error

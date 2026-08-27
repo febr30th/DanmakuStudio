@@ -60,8 +60,6 @@ animation:
 # =============================================================================
 # system:
 #   pipe_buffer_size: 10000000   # 管道缓冲区大小（字节）
-#   pipe_queue_size: 16          # 异步写入队列大小
-#   ffmpeg_timeout: 10           # FFmpeg 启动超时（秒）
+#   ffmpeg_timeout: 10           # FFmpeg/ffprobe 检测与元数据读取超时（秒）
 #   stderr_thread_timeout: 5     # 错误日志线程超时（秒）
 #   video_alignment: 2           # 视频尺寸对齐到偶数，避免 1080 被放大到 1088
-#   max_queue_frames: 64         # 异步写入队列最大帧数
