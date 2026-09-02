@@ -24,7 +24,7 @@ if (-not (Test-Path -LiteralPath $VenvPython)) {
 }
 
 Write-Host "Running tests..."
-$PytestTemp = Join-Path $ProjectRoot ".pytest-tmp"
+$PytestTemp = Join-Path $ProjectRoot (".pytest-tmp-{0}" -f $PID)
 Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
     "-m", "pytest", "-p", "no:cacheprovider", "--basetemp", $PytestTemp
 )

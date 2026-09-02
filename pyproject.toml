@@ -1,7 +1,7 @@
 [project]
 name = "danmakustudio"
 version = "0.1.0"
-description = "图形化弹幕/LRC 批量压制工具"
+description = "图形化弹幕/LRC 视频压制与分段合并工具"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

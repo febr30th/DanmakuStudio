@@ -11,8 +11,9 @@ import math
 import os
 import subprocess
 import threading
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Deque
+from typing import Deque, TypedDict
 from uuid import uuid4
 
 from loguru import logger
@@ -28,22 +29,41 @@ _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _AUDIO_ENCODE_ARGS = ("-c:a", "aac", "-b:a", "192k")
 
 
+class _VideoInfo(TypedDict):
+    path: str
+    w: int
+    h: int
+    fps: float
+    frames: int
+    duration: float
+    streams: tuple[tuple[object, ...], ...]
+
+
 class FFmpegManager:
     """FFmpeg 进程管理器"""
 
     def __init__(
         self,
-        video_in: str,
+        video_in: str | Sequence[str],
         video_out: str,
         encode_mode: str = EncodeMode.AUTO,
         encode_params: EncodeParams = DEFAULT_CONFIG.encode,
         system_params: SystemParams = DEFAULT_CONFIG.system,
         force: bool = False,
     ):
-        self.video_in = video_in
+        self.video_inputs = (
+            (video_in,)
+            if isinstance(video_in, str)
+            else tuple(video_in)
+        )
+        if not self.video_inputs:
+            raise ValueError("至少需要一个输入视频")
+        self.video_in = self.video_inputs[0]
         self.video_out = video_out
         self.force = force
         self._temp_video_out = self._make_temporary_output_path(video_out)
+        self._concat_list_path: str | None = None
+        self._video_infos: list[_VideoInfo] = []
         self.encode_mode = encode_mode
         self.encode_params = encode_params
         self.system_params = system_params
@@ -63,6 +83,39 @@ class FFmpegManager:
             f"{output_path.suffix}"
         )
         return str(output_path.with_name(temp_name))
+
+    @staticmethod
+    def _make_concat_list_path(video_out: str) -> str:
+        output_path = Path(video_out)
+        name = f".{output_path.stem}.danmakustudio-{uuid4().hex}.concat.txt"
+        return str(output_path.with_name(name))
+
+    @staticmethod
+    def _quote_concat_path(path: str) -> str:
+        """生成 FFmpeg concat demuxer 可读取的绝对路径。"""
+        normalized = Path(path).resolve().as_posix()
+        return normalized.replace("'", "'\\''")
+
+    def _ensure_concat_list(self) -> str:
+        if self._concat_list_path is not None:
+            return self._concat_list_path
+
+        concat_path = self._make_concat_list_path(self.video_out)
+        content = "".join(
+            f"file '{self._quote_concat_path(path)}'\n"
+            for path in self.video_inputs
+        )
+        try:
+            Path(concat_path).write_text(content, encoding="utf-8")
+        except OSError as e:
+            raise EncodeError(f"创建视频合并清单失败: {concat_path} - {e}") from e
+        self._concat_list_path = concat_path
+        return concat_path
+
+    def _input_args(self) -> list[str]:
+        if len(self.video_inputs) == 1:
+            return ["-i", self.video_in]
+        return ["-f", "concat", "-safe", "0", "-i", self._ensure_concat_list()]
 
     def _resolve_encode_mode(self) -> None:
         """解析编码模式。"""
@@ -172,6 +225,8 @@ class FFmpegManager:
         """解析 ffprobe 可能返回的 nb_frames。"""
         if value in (None, "", "N/A"):
             return 0
+        if not isinstance(value, (str, int, float)):
+            return 0
         try:
             parsed = int(value)
         except (TypeError, ValueError):
@@ -183,6 +238,8 @@ class FFmpegManager:
         for value in values:
             if value in (None, "", "N/A"):
                 continue
+            if not isinstance(value, (str, int, float)):
+                continue
             try:
                 duration = float(value)
             except (TypeError, ValueError):
@@ -191,13 +248,17 @@ class FFmpegManager:
                 return duration
         return 0.0
 
-    def get_video_info(self) -> dict[str, int | float]:
-        """获取视频元数据"""
+    def _probe_video(self, video_path: str) -> _VideoInfo:
+        """读取一个视频片段的元数据及流兼容性签名。"""
         cmd = [
-            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "ffprobe", "-v", "error",
             "-show_entries",
-            "stream=width,height,avg_frame_rate,r_frame_rate,nb_frames,duration:format=duration",
-            "-of", "json", self.video_in,
+            (
+                "stream=index,codec_type,codec_name,width,height,pix_fmt,"
+                "avg_frame_rate,r_frame_rate,time_base,nb_frames,duration,"
+                "sample_rate,channels,channel_layout:format=duration"
+            ),
+            "-of", "json", video_path,
         ]
         try:
             result = subprocess.run(
@@ -209,39 +270,123 @@ class FFmpegManager:
                 creationflags=_CREATE_NO_WINDOW,
             )
             data = json.loads(result.stdout)
-            info = data["streams"][0]
+            streams = data["streams"]
+            info = next(
+                (stream for stream in streams if stream.get("codec_type") == "video"),
+                streams[0],
+            )
         except subprocess.TimeoutExpired as e:
             raise EncodeError(
-                f"读取视频信息超时（{self.system_params.ffmpeg_timeout} 秒）"
+                f"读取视频信息超时（{self.system_params.ffmpeg_timeout} 秒）: {video_path}"
             ) from e
         except FileNotFoundError as e:
             raise EncodeError("未找到 ffprobe，请确认 FFmpeg 已安装并加入 Path") from e
         except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, IndexError) as e:
-            raise EncodeError(f"读取视频信息失败: {e}") from e
+            raise EncodeError(f"读取视频信息失败: {video_path} - {e}") from e
 
         fps = self._parse_fraction(info.get("avg_frame_rate"))
         if fps <= 0:
             fps = self._parse_fraction(info.get("r_frame_rate"))
         if fps <= 0:
-            raise EncodeError("无法读取有效视频帧率")
+            raise EncodeError(f"无法读取有效视频帧率: {video_path}")
 
         frames = self._parse_positive_int(info.get("nb_frames"))
+        duration = self._parse_duration(
+            info.get("duration"),
+            data.get("format", {}).get("duration"),
+        )
         if frames == 0:
-            duration = self._parse_duration(
-                info.get("duration"),
-                data.get("format", {}).get("duration"),
-            )
             if duration <= 0:
-                raise EncodeError("无法读取视频帧数或时长")
+                raise EncodeError(f"无法读取视频帧数或时长: {video_path}")
             frames = max(1, math.ceil(duration * fps))
+        if duration <= 0:
+            duration = frames / fps
 
         try:
             width = int(info["width"])
             height = int(info["height"])
         except (KeyError, TypeError, ValueError) as e:
-            raise EncodeError(f"无法读取有效视频尺寸: {e}") from e
+            raise EncodeError(f"无法读取有效视频尺寸: {video_path} - {e}") from e
 
-        return {"w": width, "h": height, "fps": fps, "frames": frames}
+        stream_signature = tuple(
+            (
+                stream.get("codec_type"),
+                stream.get("codec_name"),
+                stream.get("time_base"),
+                stream.get("width"),
+                stream.get("height"),
+                stream.get("pix_fmt"),
+                stream.get("sample_rate"),
+                stream.get("channels"),
+                stream.get("channel_layout"),
+            )
+            for stream in streams
+        )
+        return {
+            "path": video_path,
+            "w": width,
+            "h": height,
+            "fps": fps,
+            "frames": frames,
+            "duration": duration,
+            "streams": stream_signature,
+        }
+
+    @staticmethod
+    def _compatibility_differences(
+        reference: _VideoInfo,
+        candidate: _VideoInfo,
+    ) -> list[str]:
+        differences: list[str] = []
+        if (reference["w"], reference["h"]) != (candidate["w"], candidate["h"]):
+            differences.append("分辨率")
+        if reference["streams"] != candidate["streams"]:
+            differences.append("音视频流参数")
+        return differences
+
+    def get_video_info(self) -> dict[str, int | float]:
+        """获取单视频或兼容分段视频的汇总元数据。"""
+        infos = [self._probe_video(path) for path in self.video_inputs]
+        reference = infos[0]
+        for info in infos[1:]:
+            if not math.isclose(
+                reference["fps"],
+                info["fps"],
+                rel_tol=1e-4,
+                abs_tol=1e-3,
+            ):
+                logger.warning(
+                    "视频片段报告帧率不一致，将使用首段帧率生成弹幕层且不转换"
+                    "视频帧率: {} ({:.3f} fps), {} ({:.3f} fps)",
+                    Path(str(reference["path"])).name,
+                    reference["fps"],
+                    Path(str(info["path"])).name,
+                    info["fps"],
+                )
+            differences = self._compatibility_differences(reference, info)
+            if differences:
+                raise EncodeError(
+                    "视频片段参数不兼容: "
+                    f"{Path(str(info['path'])).name} 与 "
+                    f"{Path(str(reference['path'])).name} 的 "
+                    f"{'、'.join(differences)} 不一致"
+                )
+
+        self._video_infos = infos
+        total_duration = sum(info["duration"] for info in infos)
+        total_frames = max(1, math.ceil(total_duration * reference["fps"]))
+        return {
+            "w": reference["w"],
+            "h": reference["h"],
+            "fps": reference["fps"],
+            "frames": total_frames,
+        }
+
+    def get_segment_durations(self) -> tuple[float, ...]:
+        """返回与 concat 输入顺序一致的片段时长。"""
+        if not self._video_infos:
+            self.get_video_info()
+        return tuple(info["duration"] for info in self._video_infos)
 
     def build_command(self, fps: float, w: int, h: int, layer_params: LayerParams) -> list[str]:
         """构建 FFmpeg 命令"""
@@ -254,7 +399,7 @@ class FFmpegManager:
     def _build_gpu_command(self, fps: float, w: int, h: int, lp: LayerParams) -> list[str]:
         return [
             "ffmpeg", "-y",
-            "-i", self.video_in,
+            *self._input_args(),
             "-f", "rawvideo",
             "-pix_fmt", "bgra",
             "-s", f"{lp.layer_w}x{lp.layer_h}",
@@ -282,7 +427,7 @@ class FFmpegManager:
     def _build_qsv_command(self, fps: float, w: int, h: int, lp: LayerParams) -> list[str]:
         return [
             "ffmpeg", "-y",
-            "-i", self.video_in,
+            *self._input_args(),
             "-f", "rawvideo",
             "-pix_fmt", "bgra",
             "-s", f"{lp.layer_w}x{lp.layer_h}",
@@ -311,7 +456,7 @@ class FFmpegManager:
 
         return [
             "ffmpeg", "-y",
-            "-i", self.video_in,
+            *self._input_args(),
             "-f", "rawvideo",
             "-pix_fmt", "bgra",
             "-s", f"{lp.layer_w}x{lp.layer_h}",
@@ -407,6 +552,18 @@ class FFmpegManager:
         except OSError as e:
             logger.warning("无法删除临时输出: {} ({})", temp_path, e)
 
+    def _discard_concat_list(self) -> None:
+        """清理多段视频使用的临时 concat 清单。"""
+        if self._concat_list_path is None:
+            return
+        concat_path = Path(self._concat_list_path)
+        try:
+            concat_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("无法删除视频合并清单: {} ({})", concat_path, e)
+        finally:
+            self._concat_list_path = None
+
     def _publish_output(self) -> None:
         """把完整临时文件原子发布到最终输出路径。"""
         temp_path = Path(self._temp_video_out)
@@ -426,6 +583,17 @@ class FFmpegManager:
         except OSError as e:
             raise EncodeError(f"发布输出文件失败: {output_path} - {e}") from e
 
+    def cancel(self) -> None:
+        """尽快终止正在运行的 FFmpeg；最终文件清理由 cleanup 统一完成。"""
+        proc = self.process
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+        except OSError as e:
+            logger.warning("终止 FFmpeg 失败，将由清理流程继续处理: {}", e)
+
     def cleanup(self, *, publish_output: bool = True) -> None:
         """清理资源。
 
@@ -438,6 +606,7 @@ class FFmpegManager:
         proc = self.process
         if proc is None:
             self._discard_temporary_output()
+            self._discard_concat_list()
             return
 
         # 第一步：关闭 stdin，通知 FFmpeg 输入结束
@@ -486,6 +655,8 @@ class FFmpegManager:
 
         if cleanup_error is not None or not publish_output:
             self._discard_temporary_output()
+
+        self._discard_concat_list()
 
         if cleanup_error is not None:
             raise cleanup_error

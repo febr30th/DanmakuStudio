@@ -24,6 +24,6 @@ output*.mp4
 # Test coverage
 .coverage
 htmlcov/
-.pytest-tmp/
+.pytest-tmp*/
 .pytest_cache/
 .ruff_cache/

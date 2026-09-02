@@ -2,11 +2,11 @@
 
 [中文](README.md) | [English](README.en.md)
 
-A graphical batch processing tool for burning danmaku/LRC subtitles into videos. It combines livestream recordings with danmaku XML or LRC files and permanently renders the comments as translucent, rounded bubbles on the video.
+A graphical tool for burning danmaku/LRC subtitles into one or more video segments. It combines livestream recordings with danmaku XML or LRC files and permanently renders the comments as translucent, rounded bubbles on the video.
 
 ## Features
 
-- **Graphical batch processing** - Select multiple videos or folders and recursively discover videos in folders
+- **Graphical media arrangement** - Select one or more videos and produce one finished video
 - **Automatic subtitle matching** - Find XML/LRC files with matching names in the same directory; XML takes priority when both formats are present
 - **XML/LRC support** - XML supports regular comments and gift messages; LRC supports timestamped text and attempts to recognize usernames in common export formats
 - **Two-zone layout** - Gift messages and text comments use independent layouts and do not interfere with each other
@@ -81,7 +81,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\run_gui.ps1
 ```
 
-In a clean clone, `test.ps1` and `run_gui.ps1` automatically invoke `setup.ps1` first when `.venv` does not exist. Test temporary files are written to the ignored `.pytest-tmp/` directory inside the repository, so the tests do not depend on permission to use the system temporary directory.
+In a clean clone, `test.ps1` and `run_gui.ps1` automatically invoke `setup.ps1` first when `.venv` does not exist. Each run writes test temporary files to its own ignored `.pytest-tmp-*/` directory inside the repository, so tests neither depend on the system temporary directory nor get blocked by stale files from an interrupted run.
 
 ### Manual installation
 
@@ -125,7 +125,7 @@ Running `danmakustudio` without arguments also opens the graphical interface:
 danmakustudio
 ```
 
-Use the graphical interface to select video files or folders. When you select a folder, the application recursively discovers supported video files and automatically matches subtitle files with the same base name in the same directory.
+Click **Select videos** to open the material editor directly. Both lists are empty the first time; later openings retain the currently selected videos, danmaku files, and output path. The editor manages videos on the left and danmaku files on the right; each list supports adding, removing, and reordering. Adding another video also discovers and adds its matching danmaku file.
 
 Supported video extensions:
 
@@ -150,6 +150,12 @@ video.lrc
 ```
 
 When matching XML and LRC files both exist, the application uses the XML file.
+
+Multiple selected videos are merged directly into one output. The interface does not expose a separate timeline-mode selector. One danmaku file starts at `00:00` on the complete output timeline. Multiple selected danmaku files are automatically organized and all included in the final output; differing list sizes do not block the next step.
+
+Videos and danmaku files may come from different folders. The next step remains disabled only while either list is empty. Before processing, ffprobe verifies segment resolution and audio/video stream parameters; incompatible segments are rejected. Different reported frame rates do not block the task: the first segment's reported frame rate is used to generate the danmaku layer, whose coverage is calculated from the total segment duration. Videos are not resized, frame-rate-normalized, or pre-transcoded. Long VFR videos or large frame-rate differences may still cause slight danmaku timing drift.
+
+During processing, **Cancel task** asks for confirmation, stops FFmpeg, discards the unfinished output, and deletes temporary video and concat-list files. The selected materials remain available for another attempt.
 
 ### Command line
 
@@ -293,7 +299,7 @@ DanmakuStudio/
 ├── src/danmakustudio/        # Core package
 │   ├── cli.py                # CLI entry point
 │   ├── gui.py                # Graphical interface entry point
-│   ├── batch.py              # Batch file discovery and subtitle matching
+│   ├── batch.py              # Single-output task and subtitle matching
 │   ├── config/               # Configuration modules
 │   ├── core/                 # Processing-pipeline orchestration
 │   ├── encode/               # FFmpeg process management

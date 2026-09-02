@@ -20,9 +20,12 @@ from danmakustudio.layout.params import LayerParams
 def _make_manager(active_pipeline: str = EncodeMode.CPU) -> FFmpegManager:
     manager = FFmpegManager.__new__(FFmpegManager)
     manager.video_in = "input.webm"
+    manager.video_inputs = (manager.video_in,)
     manager.video_out = "output.mp4"
     manager.force = False
     manager._temp_video_out = ".output.danmakustudio-test.mp4"
+    manager._concat_list_path = None
+    manager._video_infos = []
     manager.encode_mode = active_pipeline
     manager.encode_params = EncodeParams()
     manager.system_params = SystemParams()
@@ -141,6 +144,121 @@ def test_get_video_info_reports_configured_timeout(monkeypatch):
         manager.get_video_info()
 
 
+def test_get_video_info_aggregates_compatible_segments(monkeypatch):
+    manager = _make_manager()
+    manager.video_inputs = ("part1.mp4", "part2.mp4")
+
+    def fake_run(args, **_kwargs):
+        duration = "2.0" if args[-1] == "part1.mp4" else "3.0"
+        frames = "60" if args[-1] == "part1.mp4" else "90"
+        data = {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "pix_fmt": "yuv420p",
+                    "avg_frame_rate": "30/1",
+                    "r_frame_rate": "30/1",
+                    "time_base": "1/15360",
+                    "nb_frames": frames,
+                    "duration": duration,
+                },
+                {
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "time_base": "1/48000",
+                    "sample_rate": "48000",
+                    "channels": 2,
+                    "channel_layout": "stereo",
+                },
+            ],
+            "format": {"duration": duration},
+        }
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(data))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    info = manager.get_video_info()
+
+    assert info == {"w": 1920, "h": 1080, "fps": 30.0, "frames": 150}
+    assert manager.get_segment_durations() == (2.0, 3.0)
+
+
+def test_get_video_info_accepts_different_reported_frame_rates(monkeypatch):
+    manager = _make_manager()
+    manager.video_inputs = ("part1.mp4", "part2.mp4")
+
+    def fake_run(args, **_kwargs):
+        first_segment = args[-1] == "part1.mp4"
+        duration = "2.0" if first_segment else "3.0"
+        frame_rate = "30/1" if first_segment else "25/1"
+        frames = "60" if first_segment else "75"
+        data = {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "pix_fmt": "yuv420p",
+                    "avg_frame_rate": frame_rate,
+                    "r_frame_rate": frame_rate,
+                    "time_base": "1/15360",
+                    "nb_frames": frames,
+                    "duration": duration,
+                },
+                {
+                    "codec_type": "audio",
+                    "codec_name": "aac",
+                    "time_base": "1/48000",
+                    "sample_rate": "48000",
+                    "channels": 2,
+                    "channel_layout": "stereo",
+                },
+            ],
+            "format": {"duration": duration},
+        }
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(data))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    info = manager.get_video_info()
+
+    assert info == {"w": 1920, "h": 1080, "fps": 30.0, "frames": 150}
+    assert manager.get_segment_durations() == (2.0, 3.0)
+
+
+def test_get_video_info_rejects_incompatible_segments(monkeypatch):
+    manager = _make_manager()
+    manager.video_inputs = ("part1.mp4", "part2.mp4")
+
+    def fake_run(args, **_kwargs):
+        width = 1920 if args[-1] == "part1.mp4" else 1280
+        data = {
+            "streams": [{
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": width,
+                "height": 1080,
+                "pix_fmt": "yuv420p",
+                "avg_frame_rate": "30/1",
+                "r_frame_rate": "30/1",
+                "time_base": "1/15360",
+                "nb_frames": "60",
+                "duration": "2.0",
+            }],
+            "format": {"duration": "2.0"},
+        }
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(data))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(EncodeError, match="视频片段参数不兼容.*分辨率"):
+        manager.get_video_info()
+
+
 @pytest.mark.parametrize(
     ("method_name", "encoder_name"),
     [
@@ -216,6 +334,29 @@ def _set_output_paths(
         tmp_path / ".output.danmakustudio-test.mp4"
     )
     manager.force = force
+
+
+def test_multi_video_command_uses_and_cleans_concat_list(tmp_path):
+    manager = _make_manager()
+    _set_output_paths(manager, tmp_path)
+    first = tmp_path / "part1.mp4"
+    second = tmp_path / "part2.mp4"
+    manager.video_in = str(first)
+    manager.video_inputs = (str(first), str(second))
+
+    cmd = manager.build_command(30.0, 1920, 1080, _layer_params())
+    concat_path = Path(cmd[cmd.index("concat") + 4])
+
+    assert cmd[:8] == [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_path),
+    ]
+    content = concat_path.read_text(encoding="utf-8")
+    assert first.resolve().as_posix() in content
+    assert second.resolve().as_posix() in content
+
+    manager.cleanup(publish_output=False)
+
+    assert not concat_path.exists()
 
 
 def test_cleanup_publishes_complete_output(tmp_path):
@@ -304,3 +445,23 @@ def test_cleanup_atomically_replaces_existing_output_when_forced(tmp_path):
 
     assert final_output.read_bytes() == b"complete video"
     assert not temp_output.exists()
+
+
+def test_cancel_terminates_running_ffmpeg():
+    manager = _make_manager()
+
+    class RunningProcess:
+        terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+    process = RunningProcess()
+    manager.process = process
+
+    manager.cancel()
+
+    assert process.terminated

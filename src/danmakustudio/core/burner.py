@@ -6,6 +6,9 @@ DanmakuBurner 是弹幕压制的编排器，负责组合各子模块完成完整
 from __future__ import annotations
 
 import sys
+import threading
+from collections.abc import Sequence
+from dataclasses import replace
 from itertools import chain
 from pathlib import Path
 from time import perf_counter
@@ -14,8 +17,9 @@ from typing import Any, Callable
 from loguru import logger
 from tqdm import tqdm
 
+from ..batch import SubtitleMode
 from ..config.models import DanmakuConfig, DEFAULT_CONFIG, EncodeMode
-from ..errors import EncodeError, DanmakuStudioError
+from ..errors import EncodeError, DanmakuStudioError, InputError, TaskCancelled
 from ..input.parser import parse_subtitle
 from ..layout.engine import LayoutEngine, LayoutContext
 from ..layout.params import LayoutParams, LayerParams
@@ -47,54 +51,128 @@ class DanmakuBurner:
 
     def __init__(
         self,
-        video_in: str,
-        xml_in: str,
+        video_in: str | Sequence[str],
+        xml_in: str | Sequence[str | None],
         video_out: str | None = None,
         encode_mode: str = EncodeMode.AUTO,
         config: DanmakuConfig = DEFAULT_CONFIG,
         force: bool = False,
         progress_callback: ProgressCallback | None = None,
+        subtitle_mode: SubtitleMode | str = SubtitleMode.FULL,
+        cancel_event: threading.Event | None = None,
     ):
         """初始化弹幕压制引擎
         Args:
-            video_in: 输入视频路径
-            xml_in: 输入弹幕 XML/LRC 文件路径
+            video_in: 一个输入视频路径，或按成品顺序排列的视频片段
+            xml_in: 完整字幕路径，或与视频片段对应的字幕路径列表
             video_out: 输出视频路径
             encode_mode: 编码模式
             config: 弹幕配置
             force: 是否强制覆盖输出文件
             progress_callback: 进度回调，用于 GUI 更新当前任务进度
         """
-        validate_video_input(video_in)
-        validate_subtitle_input(xml_in)
+        self.video_inputs = (
+            (video_in,)
+            if isinstance(video_in, str)
+            else tuple(video_in)
+        )
+        self.subtitle_inputs = (
+            (xml_in,)
+            if isinstance(xml_in, str)
+            else tuple(xml_in)
+        )
+        if not self.video_inputs:
+            raise InputError("至少需要一个输入视频")
+        try:
+            self.subtitle_mode = SubtitleMode(subtitle_mode)
+        except ValueError as e:
+            raise InputError(f"不支持的字幕时间轴模式: {subtitle_mode}") from e
+        if (
+            self.subtitle_mode == SubtitleMode.PER_SEGMENT
+            and len(self.subtitle_inputs) != len(self.video_inputs)
+        ):
+            raise InputError("分段字幕数量必须与视频片段数量一致")
+        if not any(path is not None for path in self.subtitle_inputs):
+            raise InputError("至少需要选择一份字幕")
 
-        self.video_in = video_in
-        self.xml_in = xml_in
-        self.subtitle_in = xml_in
+        for path in self.video_inputs:
+            validate_video_input(path)
+        for path in self.subtitle_inputs:
+            if path is not None:
+                validate_subtitle_input(path)
+
+        self.video_in = self.video_inputs[0]
+        self.xml_in = next(path for path in self.subtitle_inputs if path is not None)
+        self.subtitle_in = self.xml_in
         self._config = config
         self._progress_callback = progress_callback
+        self._cancel_event = cancel_event or threading.Event()
 
         if video_out:
             self.video_out = video_out
         else:
-            video_path = Path(video_in)
+            video_path = Path(self.video_in)
             self.video_out = str(video_path.parent / f"{video_path.stem}-弹幕版.mp4")
 
         validate_output_path(self.video_out, force)
 
         self._asset_provider = AssetLoader(font_size=self._config.style.font_size)
         self._frame_encoder = FFmpegManager(
-            video_in, self.video_out, encode_mode,
+            self.video_inputs, self.video_out, encode_mode,
             self._config.encode, self._config.system, force=force,
         )
+
+    def _parse_subtitle_events(
+        self,
+        segment_durations: tuple[float, ...],
+    ) -> list[Any]:
+        """解析字幕，并把逐段字幕平移到合并后的成品时间轴。"""
+        min_gift_price = self._config.animation.min_gift_price
+        if self.subtitle_mode == SubtitleMode.FULL:
+            events = [
+                event
+                for subtitle_path in self.subtitle_inputs
+                if subtitle_path is not None
+                for event in parse_subtitle(
+                    subtitle_path,
+                    min_gift_price=min_gift_price,
+                )
+            ]
+            events.sort(key=lambda event: event.time)
+            return events
+
+        events: list[Any] = []
+        offset = 0.0
+        for subtitle_path, duration in zip(self.subtitle_inputs, segment_durations):
+            if subtitle_path is not None:
+                segment_events = parse_subtitle(
+                    subtitle_path,
+                    min_gift_price=min_gift_price,
+                )
+                events.extend(
+                    replace(event, time=event.time + offset)
+                    for event in segment_events
+                )
+            offset += duration
+        events.sort(key=lambda event: event.time)
+        return events
+
+    def cancel(self) -> None:
+        """请求停止当前压制，并尽快终止正在运行的 FFmpeg。"""
+        self._cancel_event.set()
+        self._frame_encoder.cancel()
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise TaskCancelled("用户取消了压制任务")
 
     def run(self) -> None:
         """执行完整的弹幕压制流程。
 
         按顺序执行 8 个步骤：
-        1. 解析弹幕字幕
-        2. 加载资源文件
-        3. 获取视频元数据
+        1. 获取视频元数据
+        2. 解析弹幕字幕
+        3. 加载资源文件
         4. 计算布局参数
         5. 预创建弹幕对象
         6. 构建 FFmpeg 编码命令
@@ -112,20 +190,9 @@ class DanmakuBurner:
         style = cfg.style
         syscfg = cfg.system
 
+        self._check_cancelled()
+
         # Step 1
-        events = parse_subtitle(self.subtitle_in, min_gift_price=cfg.animation.min_gift_price)
-        subtitle_type = Path(self.subtitle_in).suffix.upper().lstrip(".")
-        logger.info(f"[1/8] 解析 {subtitle_type}: {len(events)} 条事件")
-
-        # Step 2
-        self._asset_provider.load_assets(events)
-        logger.info(
-            f"[2/8] 加载资源: "
-            f"Emoji {len(self._asset_provider.emoji_cache)}, "
-            f"礼物 {len(self._asset_provider.gift_cache)}"
-        )
-
-        # Step 3
         v_info = self._frame_encoder.get_video_info()
         raw_w: int = int(v_info['w'])
         raw_h: int = int(v_info['h'])
@@ -138,11 +205,29 @@ class DanmakuBurner:
 
         duration = total_frames / fps if fps > 0 else 0
         logger.info(
-            f"[3/8] 视频信息: {raw_w}x{raw_h}, {fps:.2f} fps, "
+            f"[1/8] 视频信息: {raw_w}x{raw_h}, {fps:.2f} fps, "
             f"{total_frames} 帧, 时长 {_format_duration(duration)}"
         )
+        if len(self.video_inputs) > 1:
+            logger.info(f"[1/8] 合并视频片段: {len(self.video_inputs)} 段")
         if (w, h) != (raw_w, raw_h):
-            logger.info(f"[3/8] 画面尺寸对齐: {raw_w}x{raw_h} -> {w}x{h}")
+            logger.info(f"[1/8] 画面尺寸对齐: {raw_w}x{raw_h} -> {w}x{h}")
+
+        # Step 2
+        segment_durations = self._frame_encoder.get_segment_durations()
+        self._check_cancelled()
+        events = self._parse_subtitle_events(segment_durations)
+        subtitle_count = sum(path is not None for path in self.subtitle_inputs)
+        logger.info(f"[2/8] 解析字幕: {subtitle_count} 份, {len(events)} 条事件")
+
+        # Step 3
+        self._asset_provider.load_assets(events)
+        self._check_cancelled()
+        logger.info(
+            f"[3/8] 加载资源: "
+            f"Emoji {len(self._asset_provider.emoji_cache)}, "
+            f"礼物 {len(self._asset_provider.gift_cache)}"
+        )
 
         # Step 4
         layout_params, layer_params = LayoutEngine.calculate_params(
@@ -157,12 +242,17 @@ class DanmakuBurner:
         logger.info(f"[5/8] 预创建弹幕对象: {len(danmaku_pool)} 个")
 
         # Step 6
-        ffmpeg_cmd = self._frame_encoder.build_command(fps, w, h, layer_params)
+        try:
+            ffmpeg_cmd = self._frame_encoder.build_command(fps, w, h, layer_params)
+        except Exception:
+            self._frame_encoder.cleanup(publish_output=False)
+            raise
         logger.info("[6/8] 构建编码命令")
 
         # Step 7
         run_failed = False
         try:
+            self._check_cancelled()
             self._frame_encoder.start(ffmpeg_cmd)
             logger.info("[7/8] 启动 FFmpeg: 已启动")
             # 刷新异步日志队列，避免与 tqdm 进度条输出交叠
@@ -313,6 +403,7 @@ class DanmakuBurner:
 
         try:
             for frame_idx in range(total_frames):
+                self._check_cancelled()
                 current_time = frame_idx / fps
 
                 # 弹幕逻辑

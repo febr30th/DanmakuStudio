@@ -1,8 +1,14 @@
-"""批量文件发现与字幕匹配测试。"""
+"""单一成品任务的素材整理与字幕匹配测试。"""
 
 from pathlib import Path
 
-from danmakustudio.batch import collect_batch_jobs, find_matching_subtitle, iter_videos_in_folder
+from danmakustudio.batch import (
+    BatchJob,
+    SubtitleMode,
+    create_job_from_videos,
+    find_matching_subtitle,
+    suggest_subtitle,
+)
 
 
 def _touch(path: Path) -> Path:
@@ -12,7 +18,6 @@ def _touch(path: Path) -> Path:
 
 
 def test_find_matching_subtitle_prefers_xml(tmp_path):
-    """同名 XML 和 LRC 同时存在时应优先选择 XML。"""
     video = _touch(tmp_path / "demo.mp4")
     xml = _touch(tmp_path / "demo.xml")
     _touch(tmp_path / "demo.lrc")
@@ -21,57 +26,93 @@ def test_find_matching_subtitle_prefers_xml(tmp_path):
 
 
 def test_find_matching_subtitle_uses_lrc_without_xml(tmp_path):
-    """只有 LRC 时应选择 LRC。"""
     video = _touch(tmp_path / "demo.mp4")
     lrc = _touch(tmp_path / "demo.lrc")
 
     assert find_matching_subtitle(video) == lrc
 
 
-def test_iter_videos_in_folder_is_recursive(tmp_path):
-    """文件夹选择应递归查找视频。"""
-    first = _touch(tmp_path / "a.mp4")
-    second = _touch(tmp_path / "nested" / "b.mkv")
-    _touch(tmp_path / "nested" / "b.xml")
-    _touch(tmp_path / "ignore.txt")
+def test_single_video_can_suggest_only_non_matching_subtitle(tmp_path):
+    video = _touch(tmp_path / "recording.mp4")
+    subtitle = _touch(tmp_path / "danmaku.xml")
 
-    assert iter_videos_in_folder(tmp_path) == [first, second]
+    assert suggest_subtitle(video) == subtitle
 
 
-def test_collect_batch_jobs_reports_missing_subtitles(tmp_path):
-    """收集批量任务时应区分可处理任务和缺字幕视频。"""
-    with_subtitle = _touch(tmp_path / "with.mp4")
-    subtitle = _touch(tmp_path / "with.xml")
-    missing = _touch(tmp_path / "missing.mp4")
+def test_multiple_videos_with_one_subtitle_create_one_full_timeline_job(tmp_path):
+    second = _touch(tmp_path / "part2.mp4")
+    first = _touch(tmp_path / "part1.mp4")
+    subtitle = _touch(tmp_path / "complete.xml")
 
-    selection = collect_batch_jobs([tmp_path])
+    job = create_job_from_videos([second, first])
 
-    assert len(selection.jobs) == 1
-    assert selection.jobs[0].video_path == with_subtitle
-    assert selection.jobs[0].subtitle_path == subtitle
-    assert selection.jobs[0].output_path == tmp_path / "with-弹幕版.mp4"
-    assert selection.missing_subtitles == [missing]
+    assert job.video_paths == (first, second)
+    assert job.subtitle_paths == (subtitle,)
+    assert job.subtitle_mode == SubtitleMode.FULL
+    assert job.output_path == tmp_path / "part1-合并弹幕版.mp4"
 
 
-def test_iter_videos_in_folder_skips_unreadable_subfolders(tmp_path, monkeypatch):
-    """个别子目录读取失败时，不应中断整个文件夹扫描。"""
-    readable = _touch(tmp_path / "readable.mp4")
-    broken_dir = tmp_path / "broken"
-    broken_dir.mkdir()
-    original_iterdir = Path.iterdir
+def test_multiple_videos_with_matching_subtitles_create_segment_timeline_job(tmp_path):
+    first = _touch(tmp_path / "part1.mp4")
+    second = _touch(tmp_path / "part2.mp4")
+    first_subtitle = _touch(tmp_path / "part1.xml")
+    second_subtitle = _touch(tmp_path / "part2.lrc")
 
-    def fake_iterdir(path: Path):
-        if path == broken_dir:
-            raise OSError("permission denied")
-        return original_iterdir(path)
+    job = create_job_from_videos([first, second])
 
-    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
-
-    assert iter_videos_in_folder(tmp_path) == [readable]
+    assert job.video_paths == (first, second)
+    assert job.subtitle_paths == (first_subtitle, second_subtitle)
+    assert job.subtitle_mode == SubtitleMode.PER_SEGMENT
 
 
-def test_find_matching_subtitle_returns_none_when_directory_unreadable(tmp_path, monkeypatch):
-    """字幕目录读取失败时应返回 None，而不是让批量收集崩溃。"""
+def test_multiple_videos_keep_missing_segment_subtitle_editable(tmp_path):
+    first = _touch(tmp_path / "part1.mp4")
+    second = _touch(tmp_path / "part2.mp4")
+    first_subtitle = _touch(tmp_path / "part1.xml")
+    _touch(tmp_path / "unrelated.lrc")
+
+    job = create_job_from_videos([first, second])
+
+    assert job.subtitle_paths == (first_subtitle, None)
+    assert job.subtitle_mode == SubtitleMode.PER_SEGMENT
+
+
+def test_create_job_allows_videos_from_different_folders(tmp_path):
+    first = _touch(tmp_path / "one" / "part1.mp4")
+    second = _touch(tmp_path / "two" / "part2.mp4")
+    first_subtitle = _touch(tmp_path / "one" / "part1.xml")
+    second_subtitle = _touch(tmp_path / "two" / "part2.xml")
+
+    job = create_job_from_videos([first, second])
+
+    assert job.video_paths == (first, second)
+    assert job.subtitle_paths == (first_subtitle, second_subtitle)
+
+
+def test_job_allows_subtitle_from_different_folder(tmp_path):
+    video = _touch(tmp_path / "video.mp4")
+    subtitle = _touch(tmp_path / "other" / "video.xml")
+    job = BatchJob.single(video, subtitle)
+
+    assert job.validation_errors() == []
+
+
+def test_segment_job_requires_one_slot_per_video(tmp_path):
+    videos = (_touch(tmp_path / "part1.mp4"), _touch(tmp_path / "part2.mp4"))
+    subtitle = _touch(tmp_path / "part1.xml")
+    job = BatchJob(
+        video_paths=videos,
+        subtitle_paths=(subtitle,),
+        output_path=tmp_path / "merged.mp4",
+        subtitle_mode=SubtitleMode.PER_SEGMENT,
+    )
+
+    assert "分段字幕数量必须与视频片段数量一致" in job.validation_errors()
+
+
+def test_find_matching_subtitle_returns_none_when_directory_unreadable(
+    tmp_path, monkeypatch
+):
     video = _touch(tmp_path / "demo.mp4")
 
     def fake_iterdir(path: Path):

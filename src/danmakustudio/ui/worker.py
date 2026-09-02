@@ -1,18 +1,19 @@
-"""GUI 后台批量压制线程。"""
+"""GUI 后台压制线程。"""
 
 from __future__ import annotations
 
 import re
 import sys
+import threading
 from time import perf_counter
 
 from loguru import logger
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, SignalInstance
 
 from ..batch import BatchJob
 from ..config.loader import load_config
 from ..core.burner import DanmakuBurner
-from ..errors import DanmakuStudioError, handle_error
+from ..errors import DanmakuStudioError, TaskCancelled, handle_error
 from ..logger_config import configure_logger
 from ._shared import format_duration
 
@@ -23,7 +24,7 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 class QtLogStream:
     """把 stdout/stderr 文本转发到 Qt signal。"""
 
-    def __init__(self, log_signal: Signal):
+    def __init__(self, log_signal: SignalInstance):
         self.log_signal = log_signal
 
     def write(self, text: str) -> None:
@@ -43,11 +44,11 @@ class QtLogStream:
 
 
 class BatchWorker(QThread):
-    """后台批量压制线程。"""
+    """后台压制线程。GUI 当前只会传入一个成品任务。"""
 
     log = Signal(str)
     progress = Signal(int, int, float, float)
-    summary = Signal(int, int, int, int)
+    summary = Signal(int, int, int, int, bool)
 
     def __init__(
         self,
@@ -61,6 +62,14 @@ class BatchWorker(QThread):
         self.encode_mode = encode_mode
         self.config_path = config_path
         self.force = force
+        self._cancel_event = threading.Event()
+        self._burner: DanmakuBurner | None = None
+
+    def request_cancel(self) -> None:
+        """从 GUI 线程安全地请求取消当前任务。"""
+        self._cancel_event.set()
+        if self._burner is not None:
+            self._burner.cancel()
 
     def run(self) -> None:
         old_stdout = sys.stdout
@@ -73,12 +82,12 @@ class BatchWorker(QThread):
         generated = 0
         skipped = 0
         failed = 0
+        cancelled = False
         batch_started_at = perf_counter()
 
         try:
             configure_logger()
             config = load_config(self.config_path)
-            self.log.emit(f"总计 {total} 个任务")
             if self.config_path:
                 self.log.emit(f"配置文件: {self.config_path}")
             else:
@@ -86,12 +95,23 @@ class BatchWorker(QThread):
             self.log.emit(f"编码模式: {self.encode_mode}")
 
             for index, job in enumerate(self.jobs, start=1):
+                if self._cancel_event.is_set():
+                    cancelled = True
+                    break
                 job_started_at = perf_counter()
                 self.log.emit("")
                 self.log.emit("-" * 56)
-                self.log.emit(f"任务 {index}/{total}: {job.video_path.name}")
-                self.log.emit(f"视频: {job.video_path}")
-                self.log.emit(f"字幕: {job.subtitle_path}")
+                task_name = (
+                    job.video_path.name
+                    if len(job.video_paths) == 1
+                    else f"{job.video_path.name} 等 {len(job.video_paths)} 段"
+                )
+                self.log.emit(f"当前任务: {task_name}")
+                for segment_index, video_path in enumerate(job.video_paths, start=1):
+                    self.log.emit(f"视频 {segment_index}: {video_path}")
+                for subtitle_index, subtitle_path in enumerate(job.subtitle_paths, start=1):
+                    if subtitle_path is not None:
+                        self.log.emit(f"字幕 {subtitle_index}: {subtitle_path}")
                 self.log.emit(f"输出: {job.output_path}")
 
                 if job.output_path.exists() and not self.force:
@@ -109,43 +129,79 @@ class BatchWorker(QThread):
 
                 try:
                     burner = DanmakuBurner(
-                        video_in=str(job.video_path),
-                        xml_in=str(job.subtitle_path),
+                        video_in=[str(path) for path in job.video_paths],
+                        xml_in=[
+                            str(path) if path is not None else None
+                            for path in job.subtitle_paths
+                        ],
                         video_out=str(job.output_path),
                         encode_mode=self.encode_mode,
                         config=config,
                         force=self.force,
                         progress_callback=report_progress,
+                        subtitle_mode=job.subtitle_mode,
+                        cancel_event=self._cancel_event,
                     )
+                    self._burner = burner
                     self.log.emit("状态: 开始压制")
                     burner.run()
                     elapsed = format_duration(perf_counter() - job_started_at)
                     self.log.emit(f"状态: 完成，用时 {elapsed}")
                     generated += 1
+                except TaskCancelled:
+                    elapsed = format_duration(perf_counter() - job_started_at)
+                    self.log.emit(f"状态: 已取消，用时 {elapsed}")
+                    self.log.emit("临时文件已清理")
+                    cancelled = True
+                    break
                 except DanmakuStudioError as e:
+                    if self._cancel_event.is_set():
+                        elapsed = format_duration(perf_counter() - job_started_at)
+                        self.log.emit(f"状态: 已取消，用时 {elapsed}")
+                        self.log.emit("临时文件已清理")
+                        cancelled = True
+                        break
                     elapsed = format_duration(perf_counter() - job_started_at)
                     self.log.emit(f"状态: 失败，用时 {elapsed}")
                     self.log.emit(f"原因 [{e.category.value}]: {e}")
                     failed += 1
                 except Exception as e:
+                    if self._cancel_event.is_set():
+                        elapsed = format_duration(perf_counter() - job_started_at)
+                        self.log.emit(f"状态: 已取消，用时 {elapsed}")
+                        self.log.emit("临时文件已清理")
+                        cancelled = True
+                        break
                     handle_error(e, component="gui", operation="batch_run")
                     elapsed = format_duration(perf_counter() - job_started_at)
                     self.log.emit(f"状态: 失败，用时 {elapsed}")
                     self.log.emit(f"原因: {e}")
                     failed += 1
+                finally:
+                    self._burner = None
 
             self.log.emit("")
-            self.log.emit(
-                "批量任务处理完成: "
-                f"成功 {generated}, 跳过 {skipped}, 失败 {failed}, "
-                f"总用时 {format_duration(perf_counter() - batch_started_at)}"
-            )
+            if cancelled:
+                self.log.emit(
+                    "任务已取消，"
+                    f"总用时 {format_duration(perf_counter() - batch_started_at)}"
+                )
+            else:
+                self.log.emit(
+                    "任务处理完成: "
+                    f"成功 {generated}, 跳过 {skipped}, 失败 {failed}, "
+                    f"总用时 {format_duration(perf_counter() - batch_started_at)}"
+                )
         except Exception as e:
-            self.log.emit(f"批量任务启动失败: {e}")
-            failed = total - generated - skipped
+            if self._cancel_event.is_set():
+                cancelled = True
+                self.log.emit("任务已取消")
+            else:
+                self.log.emit(f"任务启动失败: {e}")
+                failed = total - generated - skipped
         finally:
+            self._burner = None
             logger.complete()
             sys.stdout = old_stdout
             sys.stderr = old_stderr
-            self.summary.emit(total, generated, skipped, failed)
-
+            self.summary.emit(total, generated, skipped, failed, cancelled)

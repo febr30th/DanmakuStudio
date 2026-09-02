@@ -83,6 +83,13 @@ class EncodeError(DanmakuStudioError):
         super().__init__(message, category=ErrorCategory.ENCODE, context=context)
 
 
+class TaskCancelled(DanmakuStudioError):
+    """用户主动取消当前任务。"""
+
+    def __init__(self, message: str = "任务已取消"):
+        super().__init__(message, category=ErrorCategory.SYSTEM)
+
+
 class ResourceError(DanmakuStudioError):
     """资源错误"""
     def __init__(self, message: str, context: ErrorContext | None = None):

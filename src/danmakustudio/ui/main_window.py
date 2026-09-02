@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -22,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..batch import BatchJob, collect_batch_jobs
+from ..batch import BatchJob
 from ..config.models import EncodeMode
 from ._shared import (
     config_dialog_start_location,
@@ -31,7 +32,7 @@ from ._shared import (
     last_config_dir_path,
     last_dir_path,
 )
-from .file_picker import FileFolderPickerDialog
+from .task_editor import TaskDetailDialog
 from .theme import CheckMarkCheckBox, refresh_dynamic_style
 from .worker import BatchWorker
 
@@ -46,7 +47,7 @@ class DanmakuStudioWindow(QWidget):
         self.resize(880, 680)
         self.setMinimumSize(760, 600)
         self.worker: BatchWorker | None = None
-        self.pending_jobs: list[BatchJob] = []
+        self.pending_job: BatchJob | None = None
         self.last_dir = str(get_app_dir())
         self.last_config_dir = ""
         self._load_last_dir()
@@ -67,7 +68,7 @@ class DanmakuStudioWindow(QWidget):
         title_layout.setSpacing(1)
         title = QLabel("DanmakuStudio")
         title.setObjectName("pageTitle")
-        subtitle = QLabel("批量弹幕压制工作台")
+        subtitle = QLabel("弹幕压制工作台")
         subtitle.setObjectName("pageSubtitle")
         title_layout.addWidget(title)
         title_layout.addWidget(subtitle)
@@ -139,9 +140,9 @@ class DanmakuStudioWindow(QWidget):
         task_header = QHBoxLayout()
         task_heading_layout = QVBoxLayout()
         task_heading_layout.setSpacing(2)
-        task_title = QLabel("任务队列")
+        task_title = QLabel("当前任务")
         task_title.setObjectName("sectionTitle")
-        task_description = QLabel("可同时选择多个视频文件或文件夹，字幕会自动匹配。")
+        task_description = QLabel("分别确认视频和弹幕，多个视频将合并为一个成品。")
         task_description.setObjectName("sectionDescription")
         task_heading_layout.addWidget(task_title)
         task_heading_layout.addWidget(task_description)
@@ -150,7 +151,7 @@ class DanmakuStudioWindow(QWidget):
 
         actions = QHBoxLayout()
         actions.setSpacing(10)
-        self.btn_choose = QPushButton("选择视频或文件夹")
+        self.btn_choose = QPushButton("选择视频…")
         self.btn_choose.clicked.connect(self.choose_items)
         actions.addWidget(self.btn_choose)
 
@@ -159,6 +160,11 @@ class DanmakuStudioWindow(QWidget):
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self.start_pending_jobs)
         actions.addWidget(self.btn_start)
+
+        self.btn_cancel = QPushButton("取消任务")
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.clicked.connect(self.cancel_running_job)
+        actions.addWidget(self.btn_cancel)
         task_header.addLayout(actions)
         task_layout.addLayout(task_header)
 
@@ -169,7 +175,7 @@ class DanmakuStudioWindow(QWidget):
         self.log.document().setMaximumBlockCount(5000)
         task_layout.addWidget(self.log, 1)
 
-        self.summary_label = QLabel("等待选择任务")
+        self.summary_label = QLabel("等待选择视频")
         self.summary_label.setObjectName("fieldHint")
         task_layout.addWidget(self.summary_label)
 
@@ -177,7 +183,7 @@ class DanmakuStudioWindow(QWidget):
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
-        self.progress_bar.setAccessibleName("批量处理进度")
+        self.progress_bar.setAccessibleName("任务处理进度")
         task_layout.addWidget(self.progress_bar)
         layout.addWidget(task_card, 1)
 
@@ -251,56 +257,36 @@ class DanmakuStudioWindow(QWidget):
             QMessageBox.warning(self, "提示", "已有任务正在处理，请稍候。")
             return
 
-        dialog = FileFolderPickerDialog(self, self.last_dir)
-        if dialog.exec() != QDialog.Accepted:
+        draft_job = self.pending_job or BatchJob.empty(Path(self.last_dir))
+        confirmation = TaskDetailDialog(draft_job, self)
+        if confirmation.exec() != QDialog.DialogCode.Accepted:
             return
 
-        selected = dialog.selected_paths()
-        self._remember_selection_dir(selected, dialog.current_directory())
-
-        selection = collect_batch_jobs(selected)
-        self.pending_jobs = []
+        self.pending_job = None
         self.btn_start.setEnabled(False)
         self.log.clear()
         self.progress_bar.setValue(0)
 
-        self.append_log("已选择:")
-        for path in selected:
-            self.append_log(f"  {path}")
+        self.pending_job = confirmation.result_job()
+        job = self.pending_job
+        self._remember_selection_dir(
+            [str(path) for path in job.video_paths],
+            self.last_dir,
+        )
 
-        if selection.ignored_paths:
-            self.append_log("")
-            self.append_log("已忽略不支持的路径:")
-            for path in selection.ignored_paths:
-                self.append_log(f"  {path}")
-
-        if selection.missing_subtitles:
-            self.append_log("")
-            self.append_log("未找到同名 XML/LRC 字幕的视频:")
-            for path in selection.missing_subtitles:
-                self.append_log(f"  {path}")
-
-        if not selection.jobs:
-            QMessageBox.warning(self, "提示", "没有找到可处理的视频和同名字幕。")
-            self.summary_label.setText("没有可处理任务")
-            self._set_status("未找到任务", "error")
-            return
-
-        self.pending_jobs = selection.jobs
-
-        self.append_log("")
-        self.append_log("将处理:")
-        for job in selection.jobs:
-            subtitle_kind = job.subtitle_path.suffix.upper().lstrip(".")
-            self.append_log(
-                f"  {job.video_path.name} + {subtitle_kind} {job.subtitle_path.name}"
-            )
+        self.append_log("已确认一个成品任务:")
+        for index, video_path in enumerate(job.video_paths, start=1):
+            self.append_log(f"  视频 {index}: {video_path}")
+        subtitles = [path for path in job.subtitle_paths if path is not None]
+        for index, subtitle_path in enumerate(subtitles, start=1):
+            self.append_log(f"  弹幕 {index}: {subtitle_path}")
+        self.append_log(f"  输出: {job.output_path}")
 
         self.btn_start.setEnabled(True)
         self.summary_label.setText(
-            f"已准备 {len(self.pending_jobs)} 个任务，点击开始处理"
+            f"已就绪：{len(job.video_paths)} 个视频，{len(subtitles)} 份弹幕"
         )
-        self._set_status(f"{len(self.pending_jobs)} 个任务就绪", "ready")
+        self._set_status("任务就绪", "ready")
 
     def _remember_selection_dir(self, selected: list[str], fallback: str) -> None:
         selected_for_last_dir = selected[0] if selected else fallback
@@ -318,27 +304,30 @@ class DanmakuStudioWindow(QWidget):
             QMessageBox.warning(self, "提示", "已有任务正在处理，请稍候。")
             return
 
-        if not self.pending_jobs:
+        if self.pending_job is None:
             QMessageBox.warning(self, "提示", "请先选择可处理的视频和字幕。")
             return
 
-        self.start_worker(list(self.pending_jobs))
+        self.start_worker(self.pending_job)
 
-    def start_worker(self, jobs: list[BatchJob]) -> None:
+    def start_worker(self, job: BatchJob) -> None:
         config_path = self.config_edit.text().strip() or None
         self.btn_choose.setEnabled(False)
         self.btn_start.setEnabled(False)
         self.btn_config.setEnabled(False)
         self.encode_combo.setEnabled(False)
         self.force_checkbox.setEnabled(False)
-        self.summary_label.setText(f"处理中: 0/{len(jobs)}")
+        self.btn_cancel.setText("取消任务")
+        self.btn_cancel.setEnabled(True)
+        self.btn_cancel.setVisible(True)
+        self.summary_label.setText("正在处理当前任务")
         self.progress_bar.setValue(0)
         self._set_status("正在处理", "busy")
         self.append_log("")
         self.append_log("开始处理...")
 
         self.worker = BatchWorker(
-            jobs=jobs,
+            jobs=[job],
             encode_mode=self.encode_combo.currentData(),
             config_path=config_path,
             force=self.force_checkbox.isChecked(),
@@ -347,6 +336,24 @@ class DanmakuStudioWindow(QWidget):
         self.worker.progress.connect(self.on_worker_progress)
         self.worker.summary.connect(self.on_worker_summary)
         self.worker.start()
+
+    def cancel_running_job(self) -> None:
+        worker = self.worker
+        if worker is None or not worker.isRunning():
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认取消任务",
+            "确定要取消正在进行的压制吗？\n已生成的临时文件会被删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setText("正在取消…")
+        self.summary_label.setText("正在取消并清理临时文件…")
+        worker.request_cancel()
 
     def on_worker_progress(
         self,
@@ -360,8 +367,7 @@ class DanmakuStudioWindow(QWidget):
         ) / max(1, task_total)
         self.progress_bar.setValue(round(overall_percent * self.progress_bar.maximum()))
         self.summary_label.setText(
-            f"处理中: 任务 {task_index}/{task_total} | "
-            f"{percent:5.1f}% | 已用 {format_duration(elapsed)}"
+            f"处理中: {percent:5.1f}% | 已用 {format_duration(elapsed)}"
         )
 
     def on_worker_summary(
@@ -370,31 +376,46 @@ class DanmakuStudioWindow(QWidget):
         generated: int,
         skipped: int,
         failed: int,
+        cancelled: bool = False,
     ) -> None:
         self.btn_choose.setEnabled(True)
         self.btn_config.setEnabled(True)
         self.encode_combo.setEnabled(True)
         self.force_checkbox.setEnabled(True)
-        self.btn_start.setEnabled(False)
-        self.pending_jobs = []
+        self.btn_cancel.setVisible(False)
+        self.btn_cancel.setText("取消任务")
         self.worker = None
+
+        if cancelled:
+            self.btn_start.setEnabled(self.pending_job is not None)
+            self.summary_label.setText("任务已取消，临时文件已清理")
+            self._set_status("任务已取消", "idle")
+            QMessageBox.information(
+                self,
+                "任务已取消",
+                "压制已取消，临时文件已清理。",
+                QMessageBox.StandardButton.Ok,
+            )
+            return
+
+        self.btn_start.setEnabled(False)
+        self.pending_job = None
         self.progress_bar.setValue(self.progress_bar.maximum())
 
-        self.summary_label.setText(
-            f"完成: 共 {total} 个，成功 {generated} 个，跳过 {skipped} 个，失败 {failed} 个"
-        )
+        if failed:
+            result_text = "处理失败"
+        elif skipped:
+            result_text = "输出已存在，任务已跳过"
+        else:
+            result_text = "处理完成"
+        self.summary_label.setText(result_text)
         if failed:
             self._set_status(f"完成 · {failed} 个失败", "error")
         else:
             self._set_status("全部完成", "done")
         QMessageBox.information(
             self,
-            "处理完成",
-            (
-                f"共 {total} 个任务\n"
-                f"成功 {generated} 个\n"
-                f"跳过 {skipped} 个\n"
-                f"失败 {failed} 个"
-            ),
-            QMessageBox.Ok,
+            "处理结果",
+            result_text,
+            QMessageBox.StandardButton.Ok,
         )
