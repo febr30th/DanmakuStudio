@@ -70,7 +70,7 @@ Run the following in PowerShell:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-The script first looks for a user-installed Python 3.13+ from python.org, creates `.venv`, upgrades pip inside it, and installs the runtime dependencies and test/check tools. Before finishing, it also verifies that PySide6/Qt can be imported successfully. To use a specific Python executable, add `-Python "C:\path\to\python.exe"`.
+Install uv 0.12.17+ first (for example, `python -m pip install uv==0.12.17`). The script first looks for a user-installed Python 3.13+ from python.org, then creates or synchronizes `.venv` with the runtime, test, and build dependencies pinned in `uv.lock`. Before finishing, it also verifies that PySide6/Qt can be imported successfully. To use a specific Python executable, add `-Python "C:\path\to\python.exe"`.
 
 FFmpeg and ffprobe are external runtime dependencies and are not downloaded into the repository. The setup script displays a warning if they are not available on `Path`.
 
@@ -81,21 +81,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\run_gui.ps1
 ```
 
-In a clean clone, `test.ps1` and `run_gui.ps1` automatically invoke `setup.ps1` first when `.venv` does not exist. Each run writes test temporary files to its own ignored `.pytest-tmp-*/` directory inside the repository, so tests neither depend on the system temporary directory nor get blocked by stale files from an interrupted run.
+`test.ps1` and `run_gui.ps1` invoke `setup.ps1` by default to synchronize the environment. Each run writes test temporary files to its own ignored `.pytest-tmp-*/` directory inside the repository, so tests neither depend on the system temporary directory nor get blocked by stale files from an interrupted run.
 
 ### Manual installation
 
-Install the runtime dependencies with pip:
+Install all locked dependencies, then install the project with the locked build backend:
 
-```bash
-python -m pip install -e .
+```powershell
+uv sync --locked --all-groups --no-install-project
+uv sync --locked --all-groups --no-build-isolation
 ```
 
-If `uv` is installed, you can instead run:
+Setup, tests, GUI startup, and packaging use this same lockfile. `test.ps1` synchronizes by default; `-NoSetup` and the build script's `-SkipInstall` validate the environment and fail on dependency drift or an outdated lockfile. Exact synchronization removes unlisted packages, so use a dedicated project environment.
 
-```bash
-uv sync
-```
+To update dependencies, explicitly run `uv lock --upgrade-package PACKAGE`, commit the relevant `pyproject.toml` and `uv.lock` changes, then retest and rebuild. Normal installation does not upgrade dependencies automatically.
 
 ## Quick start
 
@@ -257,7 +256,7 @@ The system parameters in the current `danmakustudio.yaml` are commented out, so 
 
 ## Packaging
 
-The repository root includes a one-command packaging script. In a clean clone, it creates a separate `.venv-build`, installs the project and PyInstaller, and packages the application using `DanmakuStudio.spec`:
+The repository root includes a one-command packaging script. In a clean clone, it creates a separate `.venv-build`, installs runtime, test, and build dependencies from the same lockfile, runs the full test suite in that environment, and only then packages the application using `DanmakuStudio.spec`:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
@@ -278,6 +277,8 @@ dist\DanmakuStudio\DanmakuStudio.exe
 Keep the entire `dist\DanmakuStudio\` folder when distributing the application. The program still depends on FFmpeg and ffprobe being installed on the system.
 
 Do not run `build\DanmakuStudio\DanmakuStudio.exe`; it is an intermediate PyInstaller artifact. The final executable is `dist\DanmakuStudio\DanmakuStudio.exe`.
+
+The dependency lock does not pin the system Python, FFmpeg, GPU drivers, or operating system; record these versions for each release.
 
 ## Processing pipeline
 

@@ -127,25 +127,39 @@ function Get-VenvPythonPath {
     return Join-Path $VenvPath "Scripts\python.exe"
 }
 
-function New-PythonVenvIfMissing {
+function Sync-LockedEnvironment {
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Python,
-
-        [Parameter(Mandatory = $true)]
-        [string]$VenvPath
+        [string]$ProjectRoot,
+        [string]$VenvPath,
+        [string]$Python = "",
+        [switch]$CheckOnly
     )
 
-    $venvPython = Get-VenvPythonPath -VenvPath $VenvPath
-    if (Test-Path -LiteralPath $venvPython) {
-        return $venvPython
+    $uvCommand = Get-Command "uv" -ErrorAction SilentlyContinue
+    if (-not $uvCommand) {
+        throw "uv 0.12.17+ is required. Install with: python -m pip install uv==0.12.17"
     }
-
-    if (Test-Path -LiteralPath $VenvPath) {
-        throw "Virtual environment is incomplete: $VenvPath. Remove it and run the command again."
+    if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot "uv.lock"))) {
+        throw "uv.lock is required. Restore the committed lockfile before continuing."
     }
-
-    Write-Host "Creating virtual environment: $VenvPath"
-    Invoke-CheckedCommand -FilePath $Python -ArgumentList @("-m", "venv", $VenvPath)
-    return $venvPython
+    $previousEnvironment = $env:UV_PROJECT_ENVIRONMENT
+    try {
+        $env:UV_PROJECT_ENVIRONMENT = $VenvPath
+        $syncArgs = @("sync", "--project", $ProjectRoot, "--locked", "--all-groups", "--no-python-downloads")
+        if ($Python) { $syncArgs += @("--python", $Python) }
+        if ($CheckOnly) {
+            if (-not (Test-Path -LiteralPath (Get-VenvPythonPath -VenvPath $VenvPath))) {
+                throw "Environment is missing: $VenvPath. Run setup.ps1 first."
+            }
+            Invoke-CheckedCommand -FilePath $uvCommand.Source -ArgumentList ($syncArgs + @("--check", "--no-build-isolation"))
+        }
+        else {
+            # Install the locked build backend before building the editable project.
+            Invoke-CheckedCommand -FilePath $uvCommand.Source -ArgumentList ($syncArgs + @("--no-install-project"))
+            Invoke-CheckedCommand -FilePath $uvCommand.Source -ArgumentList ($syncArgs + @("--no-build-isolation"))
+        }
+    }
+    finally {
+        $env:UV_PROJECT_ENVIRONMENT = $previousEnvironment
+    }
 }

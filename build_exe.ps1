@@ -23,18 +23,13 @@ if (-not (Test-Path -LiteralPath $SpecFile)) {
     throw "PyInstaller spec was not found: $SpecFile"
 }
 
-$Python = Resolve-PythonCommand -Python $Python
-Assert-SupportedPython -Python $Python
-$BuildPython = New-PythonVenvIfMissing -Python $Python -VenvPath $BuildVenv
-
-if (-not $SkipInstall) {
-    Write-Host "Installing build dependencies..."
-    Invoke-CheckedCommand -FilePath $BuildPython -ArgumentList @(
-        "-m", "pip", "install", "--upgrade", "pip"
-    )
-    Invoke-CheckedCommand -FilePath $BuildPython -ArgumentList @(
-        "-m", "pip", "install", "--editable", ".", "pyinstaller"
-    )
+if ($SkipInstall) {
+    Sync-LockedEnvironment -ProjectRoot $ProjectRoot -VenvPath $BuildVenv -CheckOnly
+}
+else {
+    $Python = Resolve-PythonCommand -Python $Python
+    Assert-SupportedPython -Python $Python
+    Sync-LockedEnvironment -ProjectRoot $ProjectRoot -VenvPath $BuildVenv -Python $Python
 }
 
 Write-Host "Checking build imports..."
@@ -47,6 +42,9 @@ if ($CheckOnly) {
     Write-Host "Build environment is ready: $BuildPython"
     return
 }
+
+Write-Host "Testing the locked build environment..."
+& (Join-Path $ProjectRoot "test.ps1") -Venv $BuildVenv -NoSetup
 
 Write-Host "Building DanmakuStudio..."
 Invoke-CheckedCommand -FilePath $BuildPython -ArgumentList @(

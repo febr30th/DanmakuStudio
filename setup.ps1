@@ -15,17 +15,8 @@ $Python = Resolve-PythonCommand -Python $Python
 Assert-SupportedPython -Python $Python
 
 $VenvPath = Resolve-ProjectPath -ProjectRoot $ProjectRoot -Path $Venv
-$VenvPython = New-PythonVenvIfMissing -Python $Python -VenvPath $VenvPath
-
-Write-Host "Upgrading pip..."
-Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
-    "-m", "pip", "install", "--upgrade", "pip"
-)
-
-Write-Host "Installing DanmakuStudio and development dependencies..."
-Invoke-CheckedCommand -FilePath $VenvPython -ArgumentList @(
-    "-m", "pip", "install", "--editable", ".", "--group", "dev"
-)
+Sync-LockedEnvironment -ProjectRoot $ProjectRoot -VenvPath $VenvPath -Python $Python
+$VenvPython = Get-VenvPythonPath -VenvPath $VenvPath
 
 Write-Host "Checking runtime and GUI imports..."
 & $VenvPython -c "import danmakustudio; from PySide6.QtGui import QImage; print('Runtime import check passed')"

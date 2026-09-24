@@ -16,11 +16,10 @@ Set-Location $ProjectRoot
 $VenvPath = Resolve-ProjectPath -ProjectRoot $ProjectRoot -Path $Venv
 $VenvPython = Get-VenvPythonPath -VenvPath $VenvPath
 
-if (-not (Test-Path -LiteralPath $VenvPython)) {
-    if ($NoSetup) {
-        throw "Development environment was not found: $VenvPath. Run .\setup.ps1 first."
-    }
-
+if ($NoSetup) {
+    Sync-LockedEnvironment -ProjectRoot $ProjectRoot -VenvPath $VenvPath -CheckOnly
+}
+else {
     & (Join-Path $ProjectRoot "setup.ps1") -Python $Python -Venv $Venv
 }
 

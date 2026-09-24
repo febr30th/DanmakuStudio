@@ -70,7 +70,7 @@ cd DanmakuStudio
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
-脚本会优先寻找当前用户通过 python.org 安装的 Python 3.13+，创建 `.venv`、升级其中的 pip，并安装项目运行依赖与测试/检查工具。安装完成前还会验证 PySide6/Qt 能否正常导入。需要指定 Python 路径时，可增加 `-Python "C:\path\to\python.exe"`。
+请先安装 uv 0.12.17+（例如 `python -m pip install uv==0.12.17`）。脚本会优先寻找当前用户通过 python.org 安装的 Python 3.13+，创建或同步 `.venv`，严格按 `uv.lock` 安装运行、测试和构建依赖。安装完成前还会验证 PySide6/Qt 能否正常导入。需要指定 Python 路径时，可增加 `-Python "C:\path\to\python.exe"`。
 
 FFmpeg 和 ffprobe 是外部运行依赖，不会下载到仓库；如果它们不在 `Path` 中，安装结束时会显示警告。
 
@@ -81,21 +81,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\run_gui.ps1
 ```
 
-`test.ps1` 和 `run_gui.ps1` 在干净 clone 中发现 `.venv` 不存在时，也会自动先调用 `setup.ps1`。测试临时文件写入仓库内每次独立且已忽略的 `.pytest-tmp-*/` 目录，不会依赖系统临时目录权限，也不会被上一次异常中断遗留的临时目录阻塞。
+`test.ps1` 和 `run_gui.ps1` 默认都会先调用 `setup.ps1` 同步环境。测试临时文件写入仓库内每次独立且已忽略的 `.pytest-tmp-*/` 目录，不会依赖系统临时目录权限，也不会被上一次异常中断遗留的临时目录阻塞。
 
 ### 手动安装
 
-使用 pip 安装运行依赖：
+使用锁文件安装全部依赖，再使用已锁定的构建后端安装项目：
 
-```bash
-python -m pip install -e .
+```powershell
+uv sync --locked --all-groups --no-install-project
+uv sync --locked --all-groups --no-build-isolation
 ```
 
-如果已经安装 `uv`，也可以使用：
+安装、测试、GUI 启动和打包脚本都使用这份锁文件。`test.ps1` 默认先同步；`-NoSetup` 和打包的 `-SkipInstall` 只校验环境，版本漂移或锁文件过期时会失败，不会静默继续。同步会移除锁文件之外的包，请使用项目专用虚拟环境。
 
-```bash
-uv sync
-```
+更新依赖时，显式运行 `uv lock --upgrade-package 包名`，提交 `pyproject.toml` 和 `uv.lock` 的相关变化，然后重新测试、打包。普通安装不会自动升级依赖。
 
 ## 快速开始
 
@@ -263,7 +262,7 @@ danmakustudio source/视频.mp4 source/弹幕.xml -c danmakustudio.yaml
 
 ## 打包
 
-项目根目录提供一键打包脚本。干净 clone 中执行时，脚本会创建独立的 `.venv-build`、安装项目和 PyInstaller，然后根据 `DanmakuStudio.spec` 打包：
+项目根目录提供一键打包脚本。干净 clone 中执行时，脚本会创建独立的 `.venv-build`，按同一份锁文件安装运行、测试和构建依赖，先在该环境运行完整测试，通过后再根据 `DanmakuStudio.spec` 打包：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
@@ -284,6 +283,8 @@ dist\DanmakuStudio\DanmakuStudio.exe
 发布时请保留整个 `dist\DanmakuStudio\` 文件夹。程序仍依赖系统中的 FFmpeg / ffprobe。
 
 不要运行 `build\DanmakuStudio\DanmakuStudio.exe`；它是 PyInstaller 的中间产物。最终程序是 `dist\DanmakuStudio\DanmakuStudio.exe`。
+
+依赖锁定不包含系统 Python、FFmpeg、显卡驱动和操作系统；正式发布仍需记录这些版本。
 
 ## 处理流程
 
