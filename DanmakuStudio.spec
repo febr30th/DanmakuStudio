@@ -1,8 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+# Do not resolve Qt's Windows ICU dependency against unrelated tools on PATH.
+# Qt/shiboken DLL paths are supplied by PyInstaller's dedicated hooks.
+if sys.platform == "win32":
+    windows_dir = Path(os.environ["SystemRoot"])
+    os.environ["PATH"] = os.pathsep.join(map(str, (
+        Path(sys.executable).parent,
+        Path(sys.base_prefix),
+        windows_dir / "System32",
+        windows_dir,
+    )))
 
 
 project_root = Path(SPECPATH).resolve()
@@ -10,8 +21,7 @@ project_root = Path(SPECPATH).resolve()
 datas = []
 binaries = []
 
-binaries += collect_dynamic_libs('PySide6')
-datas += collect_data_files('PySide6')
+# Let the PySide6 hooks collect only the Qt modules/plugins used by the app.
 
 config_file = project_root / "danmakustudio.yaml"
 if config_file.exists():

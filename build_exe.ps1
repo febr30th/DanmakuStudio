@@ -61,6 +61,25 @@ if (-not (Test-Path -LiteralPath $OutputExe)) {
     throw "Build finished, but executable was not found: $OutputExe"
 }
 
+Write-Host "Checking packaged EXE startup..."
+$SmokeReport = Join-Path $OutputDir ("startup-check-{0}.txt" -f [guid]::NewGuid().ToString("N"))
+$SmokeProcess = Start-Process -FilePath $OutputExe -ArgumentList @(
+    "--smoke-test", ('"{0}"' -f $SmokeReport)
+) -WorkingDirectory $OutputDir -WindowStyle Hidden -PassThru
+if (-not $SmokeProcess.WaitForExit(30000)) {
+    $SmokeProcess.Kill()
+    throw "Packaged EXE startup check timed out."
+}
+if (-not (Test-Path -LiteralPath $SmokeReport)) {
+    throw "Packaged EXE failed before producing a startup report (exit $($SmokeProcess.ExitCode))."
+}
+$SmokeResult = Get-Content -LiteralPath $SmokeReport -Raw
+if ($SmokeProcess.ExitCode -ne 0 -or $SmokeResult.Trim() -ne "OK") {
+    throw "Packaged EXE startup check failed: $SmokeResult"
+}
+Remove-Item -LiteralPath $SmokeReport
+Write-Host "Packaged EXE startup check passed."
+
 Write-Host ""
 Write-Host "Done: $OutputExe"
 Write-Host "Run it by double-clicking the exe, or from PowerShell:"

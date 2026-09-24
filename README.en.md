@@ -262,6 +262,8 @@ The repository root includes a one-command packaging script. In a clean clone, i
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
+After packaging, the script launches the generated EXE to check Qt DLLs, the native platform plugin, main-window creation, and the event loop. A failed startup check fails the build command. DLL search paths are isolated during packaging to avoid collecting conflicting libraries from tools such as Anaconda or Poppler.
+
 To verify the packaging dependencies and entry point without generating the EXE:
 
 ```powershell

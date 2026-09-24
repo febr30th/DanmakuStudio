@@ -268,6 +268,8 @@ danmakustudio source/视频.mp4 source/弹幕.xml -c danmakustudio.yaml
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
+打包完成后，脚本会自动启动生成的 EXE，验证 Qt DLL、Windows 平台插件、主窗口创建和事件循环；检查失败时打包命令会报错。构建时隔离 DLL 搜索路径，避免混入 Anaconda、Poppler 等工具的同名 DLL。
+
 如果只想验证打包依赖和入口是否可用、但不生成 exe：
 
 ```powershell
