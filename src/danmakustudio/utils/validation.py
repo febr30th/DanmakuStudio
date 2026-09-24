@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger
@@ -65,12 +66,15 @@ def validate_xml_input(xml_in: str) -> Path:
     return validate_subtitle_input(xml_in)
 
 
-def validate_output_path(video_out: str, force: bool = False) -> Path:
+def validate_output_path(
+    video_out: str, force: bool = False, *, video_inputs: Sequence[str] = (),
+) -> Path:
     """校验输出路径，检测文件覆盖。
 
     Args:
         video_out: 输出视频路径
         force: 是否强制覆盖已有文件
+        video_inputs: 不允许被输出覆盖的所有输入视频，force 不绕过此保护
 
     Returns:
         校验通过的 Path 对象
@@ -80,6 +84,19 @@ def validate_output_path(video_out: str, force: bool = False) -> Path:
     """
     path = Path(video_out)
     out_dir = path.parent
+
+    for video_in in video_inputs:
+        source = Path(video_in)
+        try:
+            same_path = path.resolve() == source.resolve()
+            same_file = path.exists() and path.samefile(source)
+        except OSError as e:
+            raise InputError(f"无法确认输出是否覆盖输入视频: {video_out} - {e}") from e
+        if same_path or same_file:
+            raise InputError(
+                f"输出路径不能与输入视频指向同一文件: {video_in}\n"
+                "请指定其他输出路径；强制覆盖也不能覆盖输入素材"
+            )
 
     if not out_dir.exists():
         raise InputError(f"输出目录不存在: {out_dir}")

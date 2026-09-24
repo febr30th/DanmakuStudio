@@ -114,7 +114,7 @@ class DanmakuBurner:
             video_path = Path(self.video_in)
             self.video_out = str(video_path.parent / f"{video_path.stem}-弹幕版.mp4")
 
-        validate_output_path(self.video_out, force)
+        validate_output_path(self.video_out, force, video_inputs=self.video_inputs)
 
         self._asset_provider = AssetLoader(font_size=self._config.style.font_size)
         self._frame_encoder = FFmpegManager(
